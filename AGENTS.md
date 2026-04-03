@@ -41,3 +41,4 @@ The agent should behave like a pragmatic senior engineer: analyze before changin
 - Validate edge cases early and handle errors explicitly.
 - Write code that is easy to test and easy to remove or extend.
 - When introducing a pattern, make sure it solves a real problem and does not add unnecessary complexity.
+- When you write code, don't write in 5 lines what you could do in 3: be smart and add comments when relevant.
