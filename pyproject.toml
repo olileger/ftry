@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ftry"
+version = "0.1.0"
+description = "Minimal mock CLI for ftry commands."
+readme = "README.md"
+requires-python = ">=3.10"
+
+[project.scripts]
+ftry = "ftry.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
