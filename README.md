@@ -4,12 +4,13 @@ CLI minimale nommee `ftry`.
 
 ## Commandes disponibles
 
-Les commandes sont pour l'instant des mocks. Elles affichent simplement leur nom dans le terminal.
+Les commandes sont pour l'instant des mocks, sauf `line`.
 
 - `ftry build`
 - `ftry break`
 - `ftry pop`
 - `ftry land`
+- `ftry line`
 
 Exemple:
 
@@ -22,6 +23,8 @@ Sortie:
 ```text
 build
 ```
+
+La commande `ftry line` charge son rendu depuis `src\ftry\line.txt`. Pour changer le visuel, il suffit donc de modifier ce fichier.
 
 ## Installation locale
 

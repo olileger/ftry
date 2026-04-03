@@ -15,5 +15,8 @@ ftry = "ftry.cli:main"
 [tool.setuptools]
 package-dir = {"" = "src"}
 
+[tool.setuptools.package-data]
+ftry = ["line.txt"]
+
 [tool.setuptools.packages.find]
 where = ["src"]
