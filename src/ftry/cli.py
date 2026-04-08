@@ -15,6 +15,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 
 RESET = "\033[0m"
+BOLD = "\033[1m"
 BRIGHT_CYAN = "\033[96m"
 BRIGHT_BLUE = "\033[94m"
 BRIGHT_YELLOW = "\033[93m"
@@ -232,7 +233,7 @@ def _ensure_trace_logger() -> logging.Logger:
 
     if not logger.handlers:
         handler = logging.StreamHandler(sys.stderr)
-        handler.setFormatter(logging.Formatter("TRACE %(message)s"))
+        handler.setFormatter(logging.Formatter("%(message)s"))
         logger.addHandler(handler)
 
     for handler in logger.handlers:
@@ -273,7 +274,7 @@ def _build_agent_trace_colors(agent_names: Sequence[str]) -> dict[str, str]:
 
 
 def _trace_team_label(team_name: str) -> str:
-    return _colorize(f"TEAM {team_name}", BRIGHT_CYAN)
+    return _colorize(f"TEAM {team_name}", f"{BOLD}{BRIGHT_CYAN}")
 
 
 def _trace_node_label(
@@ -333,12 +334,12 @@ def _trace_result(
 
 def _trace_agent_start(agent_name: str, prompt: str) -> None:
     agent_trace_colors = _build_agent_trace_colors([agent_name])
-    _trace('%s | input:%s', _colorize(f"AGENT {agent_name}", agent_trace_colors[agent_name]), _trace_block(prompt))
+    _trace('%s | input:%s', _colorize(f"AGENT {agent_name}", f"{BOLD}{agent_trace_colors[agent_name]}"), _trace_block(prompt))
 
 
 def _trace_agent_output(agent_name: str, output: str) -> None:
     agent_trace_colors = _build_agent_trace_colors([agent_name])
-    _trace('%s | output:%s', _colorize(f"AGENT {agent_name}", agent_trace_colors[agent_name]), _trace_block(output))
+    _trace('%s | output:%s', _colorize(f"AGENT {agent_name}", f"{BOLD}{agent_trace_colors[agent_name]}"), _trace_block(output))
 
 
 def _extract_message_text(message: Any) -> str:

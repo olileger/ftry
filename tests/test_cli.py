@@ -387,8 +387,8 @@ class CliTests(unittest.TestCase):
         self.assertEqual(FakeOpenAIChatCompletionClient.last_agent.instructions, "Tu es un poete.")
         self.assertEqual(FakeAgent.last_prompt, "Ecris un poeme sur la pluie")
         plain_stderr = _strip_ansi(stderr.getvalue())
-        self.assertIn("TRACE AGENT Poete | input:", plain_stderr)
-        self.assertIn("TRACE AGENT Poete | output:", plain_stderr)
+        self.assertIn("AGENT Poete | input:", plain_stderr)
+        self.assertIn("AGENT Poete | output:", plain_stderr)
 
     def test_pop_runs_team_loaded_from_yaml_file_references(self) -> None:
         fake_package = types.ModuleType("agent_framework")
@@ -478,9 +478,9 @@ class CliTests(unittest.TestCase):
         self.assertIn("Prompter, Reviewer, Runner", orchestrator_agent.instructions)
         self.assertIn("- Prompter: Builds prompts.", orchestrator_agent.instructions)
         plain_stderr = _strip_ansi(stderr.getvalue())
-        self.assertIn("TRACE TEAM Better Prompt team | pattern: group-chat | input:", plain_stderr)
-        self.assertIn("TRACE TEAM Better Prompt team --> Prompter | input:", plain_stderr)
-        self.assertIn("TRACE TEAM Better Prompt team <-- Prompter | output:", plain_stderr)
+        self.assertIn("TEAM Better Prompt team | pattern: group-chat | input:", plain_stderr)
+        self.assertIn("TEAM Better Prompt team --> Prompter | input:", plain_stderr)
+        self.assertIn("TEAM Better Prompt team <-- Prompter | output:", plain_stderr)
 
     def test_pop_runs_team_loaded_from_project_relative_file_references(self) -> None:
         fake_package = types.ModuleType("agent_framework")
@@ -554,7 +554,7 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         self.assertEqual(stdout.getvalue().strip(), "[Better Prompt team]\ngroup-chat:Ameliore ce prompt")
-        self.assertIn("TRACE TEAM Better Prompt team | pattern: group-chat | input:", _strip_ansi(stderr.getvalue()))
+        self.assertIn("TEAM Better Prompt team | pattern: group-chat | input:", _strip_ansi(stderr.getvalue()))
 
     def test_pop_runs_team_with_inline_agents_and_sequential_pattern(self) -> None:
         fake_package = types.ModuleType("agent_framework")
@@ -621,9 +621,9 @@ class CliTests(unittest.TestCase):
         self.assertIn("<TeamContext>", participants[0].instructions)
         self.assertIn("First gather the facts", participants[0].instructions)
         plain_stderr = _strip_ansi(stderr.getvalue())
-        self.assertIn("TRACE TEAM Pipeline team --> Researcher | input:", plain_stderr)
-        self.assertIn("TRACE Writer <-- Researcher | output:", plain_stderr)
-        self.assertIn("TRACE TEAM Pipeline team <-- Writer | final-output:", plain_stderr)
+        self.assertIn("TEAM Pipeline team --> Researcher | input:", plain_stderr)
+        self.assertIn("Writer <-- Researcher | output:", plain_stderr)
+        self.assertIn("TEAM Pipeline team <-- Writer | final-output:", plain_stderr)
 
     def test_pop_loads_api_key_from_dotenv_file(self) -> None:
         fake_package = types.ModuleType("agent_framework")
