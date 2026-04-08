@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import io
 import os
 import re
@@ -291,6 +292,494 @@ class CliTests(unittest.TestCase):
                 )
             )
             return handle.name
+
+    def _make_agent_config(
+        self,
+        *,
+        name: str = "Agent",
+        description: str | None = "Helpful specialist.",
+        instructions: str = "Do the work.",
+        provider: str = "openai",
+    ) -> cli.AgentConfig:
+        return cli.AgentConfig(
+            name=name,
+            description=description,
+            instructions=instructions,
+            model=cli.AgentModelConfig(name="gpt-4o", provider=provider, api_key="secret"),
+        )
+
+    def _make_team_config(
+        self,
+        *agents: cli.AgentConfig,
+        name: str = "Team",
+        description: str | None = "Helpful team.",
+        instructions: str = "Discuss and solve the request.",
+        pattern: str | None = None,
+        with_model: bool = False,
+        max_turns: int | None = None,
+    ) -> cli.TeamConfig:
+        return cli.TeamConfig(
+            name=name,
+            description=description,
+            instructions=instructions,
+            agents=agents or (self._make_agent_config(),),
+            model=cli.AgentModelConfig(name="gpt-4o", provider="openai", api_key="secret") if with_model else None,
+            pattern=pattern,
+            termination=cli.TeamTerminationConfig(max_turns=max_turns),
+        )
+
+    def _patch_agent_framework(self) -> tuple[dict[str, types.ModuleType], types.ModuleType, types.ModuleType]:
+        fake_package = types.ModuleType("agent_framework")
+        fake_openai_module = types.ModuleType("agent_framework.openai")
+        fake_openai_module.OpenAIChatCompletionClient = FakeOpenAIChatCompletionClient
+        fake_orchestrations_module = types.ModuleType("agent_framework.orchestrations")
+        fake_orchestrations_module.SequentialBuilder = FakeSequentialBuilder
+        fake_orchestrations_module.ConcurrentBuilder = FakeConcurrentBuilder
+        fake_orchestrations_module.GroupChatBuilder = FakeGroupChatBuilder
+        fake_orchestrations_module.HandoffBuilder = FakeHandoffBuilder
+        fake_orchestrations_module.MagenticBuilder = FakeMagenticBuilder
+        return (
+            {
+                "agent_framework": fake_package,
+                "agent_framework.openai": fake_openai_module,
+                "agent_framework.orchestrations": fake_orchestrations_module,
+            },
+            fake_openai_module,
+            fake_orchestrations_module,
+        )
+
+    def _reset_fakes(self) -> None:
+        FakeAgent.last_prompt = None
+        FakeOpenAIChatCompletionClient.last_model = None
+        FakeOpenAIChatCompletionClient.last_api_key = None
+        FakeOpenAIChatCompletionClient.last_agent = None
+        FakeWorkflow.last_prompt = None
+        FakeSequentialBuilder.last_kwargs = None
+        FakeConcurrentBuilder.last_kwargs = None
+        FakeGroupChatBuilder.last_kwargs = None
+        FakeMagenticBuilder.last_kwargs = None
+        FakeHandoffBuilder.last_kwargs = None
+        FakeHandoffBuilder.last_start_agent = None
+        FakeHandoffBuilder.last_autonomous_kwargs = None
+        FakeHandoffBuilder.last_termination_condition = None
+
+    def test_load_line_banner_and_mock_commands_render_expected_output(self) -> None:
+        banner = cli._load_line_banner()
+        self.assertNotIn("[pink]", banner)
+        self.assertIn(cli.RESET, banner)
+
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            mock_exit_code = cli._run_mock_command("build")
+            line_exit_code = cli._run_line_command()
+
+        self.assertEqual(mock_exit_code, 0)
+        self.assertEqual(line_exit_code, 0)
+        rendered = stdout.getvalue()
+        self.assertIn("build", rendered)
+        self.assertIn("______", _strip_ansi(rendered))
+
+    def test_validation_helpers_handle_edge_cases(self) -> None:
+        self.assertEqual(cli._require_non_empty_string("  value  ", "name"), "value")
+        self.assertIsNone(cli._require_optional_string(None, "description"))
+        self.assertEqual(cli._require_optional_string("  note  ", "description"), "note")
+        self.assertEqual(cli._require_mapping({"ok": True}, "root"), {"ok": True})
+        self.assertEqual(cli._require_sequence(["a"], "agents"), ["a"])
+        self.assertEqual(cli._require_positive_int(3, "termination.max-turns", "team"), 3)
+
+        with self.assertRaisesRegex(cli.FtryCliError, "Invalid or missing `name`"):
+            cli._require_non_empty_string("   ", "name")
+        with self.assertRaisesRegex(cli.FtryCliError, "Invalid or missing `description`"):
+            cli._require_optional_string("", "description")
+        with self.assertRaisesRegex(cli.FtryCliError, "Invalid or missing `root` mapping"):
+            cli._require_mapping([], "root")
+        with self.assertRaisesRegex(cli.FtryCliError, "Invalid or missing `agents` list"):
+            cli._require_sequence({}, "agents")
+        with self.assertRaisesRegex(cli.FtryCliError, "expected a positive integer"):
+            cli._require_positive_int(0, "termination.max-turns", "team")
+
+    def test_find_dotenv_path_and_loader_use_expected_sources(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            cwd_dir = temp_path / "cwd"
+            cwd_dir.mkdir()
+            config_dir = temp_path / "configs" / "nested"
+            config_dir.mkdir(parents=True)
+            config_path = config_dir / "agent.yaml"
+            config_path.write_text("name: Agent\n", encoding="utf-8")
+
+            cwd_dotenv = cwd_dir / ".env"
+            cwd_dotenv.write_text("FROM=cwd\n", encoding="utf-8")
+            parent_dotenv = temp_path / "configs" / ".env"
+            parent_dotenv.write_text("FROM=parent\n", encoding="utf-8")
+
+            with patch("ftry.cli.Path.cwd", return_value=cwd_dir):
+                self.assertEqual(cli._find_dotenv_path(config_path), cwd_dotenv)
+
+            cwd_dotenv.unlink()
+
+            with patch("ftry.cli.Path.cwd", return_value=cwd_dir):
+                self.assertEqual(cli._find_dotenv_path(config_path), parent_dotenv)
+
+            loaded_calls: list[tuple[Path, bool]] = []
+
+            def fake_load_dotenv(*, dotenv_path: Path, override: bool) -> bool:
+                loaded_calls.append((dotenv_path, override))
+                return True
+
+            with (
+                patch("ftry.cli.Path.cwd", return_value=cwd_dir),
+                patch("ftry.cli._load_dotenv_function", return_value=fake_load_dotenv),
+            ):
+                cli._load_dotenv_for_config(config_path)
+
+            self.assertEqual(loaded_calls, [(parent_dotenv, False)])
+
+            parent_dotenv.unlink()
+            with patch("ftry.cli.Path.cwd", return_value=cwd_dir):
+                self.assertIsNone(cli._find_dotenv_path(config_path))
+
+    def test_secret_and_team_pattern_helpers_cover_aliases_and_errors(self) -> None:
+        self.assertEqual(cli._resolve_secret("literal-secret"), "literal-secret")
+
+        with patch.dict(os.environ, {"OAI_API_KEY": "env-secret"}, clear=False):
+            self.assertEqual(cli._resolve_secret("env:OAI_API_KEY"), "env-secret")
+
+        with self.assertRaisesRegex(cli.FtryCliError, "environment variable name is missing"):
+            cli._resolve_secret("env:   ")
+        with self.assertRaisesRegex(cli.FtryCliError, "Environment variable `UNSET_KEY` is not set."):
+            cli._resolve_secret("env:UNSET_KEY")
+
+        self.assertEqual(cli._normalize_team_pattern("Group_Chat"), "group-chat")
+        self.assertEqual(cli._normalize_team_pattern("magentic-one"), "magentic")
+        with self.assertRaisesRegex(cli.FtryCliError, "Unsupported team pattern `swarm`"):
+            cli._normalize_team_pattern("swarm")
+
+        self.assertEqual(cli._parse_team_termination(None), cli.TeamTerminationConfig())
+        self.assertEqual(cli._parse_team_termination({"max-turns": 4}), cli.TeamTerminationConfig(max_turns=4))
+        with self.assertRaisesRegex(cli.FtryCliError, "expected a positive integer"):
+            cli._parse_team_termination({"max-turns": -1})
+
+    def test_message_and_output_helpers_render_expected_text(self) -> None:
+        text_message = types.SimpleNamespace(text="  direct answer  ")
+        content_message = types.SimpleNamespace(contents=[types.SimpleNamespace(text="Hello"), " world"])
+        empty_message = types.SimpleNamespace()
+
+        self.assertEqual(cli._extract_message_text(text_message), "direct answer")
+        self.assertEqual(cli._extract_message_text(content_message), "Hello world")
+        self.assertEqual(cli._extract_message_text(empty_message), "")
+
+        messages = [types.SimpleNamespace(role="assistant", text="Hi", author_name="agent-1")]
+        payload = types.SimpleNamespace(messages=messages)
+        author_name_map = {"agent-1": "Prompter", "team-1": "Better Prompt team"}
+
+        self.assertEqual(cli._extract_messages(messages), messages)
+        self.assertEqual(cli._extract_messages(payload), messages)
+        self.assertEqual(cli._extract_messages(object()), [])
+
+        self.assertEqual(cli._display_name(None), "unknown")
+        self.assertEqual(cli._display_name("agent-1", author_name_map), "Prompter")
+        self.assertEqual(cli._display_name("missing", author_name_map), "missing")
+
+        summarized = cli._summarize_payload(
+            types.SimpleNamespace(
+                messages=[
+                    types.SimpleNamespace(role="user", text="ignore me", author_name="user"),
+                    types.SimpleNamespace(role="assistant", text="Draft prompt", author_name="agent-1"),
+                ]
+            ),
+            author_name_map=author_name_map,
+        )
+        self.assertEqual(summarized, "[Prompter] Draft prompt")
+
+        chunk = cli._extract_trace_chunk(
+            types.SimpleNamespace(
+                messages=[
+                    types.SimpleNamespace(role="assistant", text="One", author_name="agent-1"),
+                    types.SimpleNamespace(role="assistant", contents=["Two"], author_name="agent-1"),
+                ]
+            )
+        )
+        self.assertEqual(chunk, "One\n\nTwo")
+
+        formatted_agent = cli._format_agent_output(
+            types.SimpleNamespace(
+                messages=[
+                    types.SimpleNamespace(role="assistant", text="Done", author_name="agent-1"),
+                    types.SimpleNamespace(role="user", text="ignored"),
+                ]
+            ),
+            author_name_map=author_name_map,
+        )
+        self.assertEqual(formatted_agent, "[Prompter]\nDone")
+
+        final_output = cli._format_final_team_output(
+            types.SimpleNamespace(
+                messages=[
+                    types.SimpleNamespace(role="assistant", text="Draft", author_name="agent-1"),
+                    types.SimpleNamespace(role="assistant", text="Final", author_name="team-1"),
+                ]
+            ),
+            author_name_map=author_name_map,
+        )
+        self.assertEqual(final_output, "[Better Prompt team]\nFinal")
+        self.assertEqual(cli._format_final_team_output(types.SimpleNamespace(text="fallback")), "fallback")
+
+    def test_summarize_trace_text_truncates_and_normalizes_whitespace(self) -> None:
+        long_text = "Line 1\r\n\r\n\r\n" + ("x" * 260)
+        summarized = cli._summarize_trace_text(long_text, max_length=40)
+        self.assertEqual(summarized[:6], "Line 1")
+        self.assertTrue(summarized.endswith("..."))
+        self.assertLessEqual(len(summarized), 40)
+
+    def test_render_team_instructions_and_analysis_helpers_include_roles(self) -> None:
+        agent = self._make_agent_config(
+            name="Prompter",
+            description=" Builds prompts.\nWith care. ",
+            instructions="Build a prompt.",
+        )
+        reviewer = self._make_agent_config(name="Reviewer", description=None, instructions="Review drafts.")
+        team = self._make_team_config(
+            agent,
+            reviewer,
+            name="Workshop",
+            description="Discuss together.",
+            instructions="Use {participants}.\n{roles}\n1. Draft.\n2. Review.",
+        )
+
+        self.assertEqual(cli._render_role_summary(agent), "Builds prompts. With care.")
+        rendered = cli._render_team_instructions(team)
+        self.assertIn("Prompter, Reviewer", rendered)
+        self.assertIn("- Reviewer: Review drafts.", rendered)
+
+        analysis_text = cli._compose_pattern_analysis_text(team)
+        self.assertIn("workshop", analysis_text)
+        self.assertTrue(cli._contains_any(analysis_text, ("review",)))
+        self.assertTrue(cli._has_numbered_steps(team.instructions))
+
+    def test_load_agent_and_team_config_validate_nominal_and_error_cases(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            with patch.dict(os.environ, {"OAI_API_KEY": "secret-key"}, clear=False):
+                agent_file = temp_path / "agent.yaml"
+                agent_file.write_text(
+                    "\n".join(
+                        [
+                            "name: Test Agent",
+                            "description: |",
+                            "  Helpful agent.",
+                            "model:",
+                            "  name: gpt-4o",
+                            "  provider: openai",
+                            "  api-key: env:OAI_API_KEY",
+                            "prompt: |",
+                            "  Do the work.",
+                        ]
+                    ),
+                    encoding="utf-8",
+                )
+
+                config = cli._load_agent_config(agent_file)
+                self.assertEqual(config.name, "Test Agent")
+                self.assertEqual(config.description, "Helpful agent.")
+
+                team_file = temp_path / "team.yaml"
+                team_file.write_text(
+                    "\n".join(
+                        [
+                            "name: Explicit Team",
+                            "pattern: group_chat",
+                            "agents:",
+                            f"  - file: .\\{agent_file.name}",
+                            "prompt: |",
+                            "  Coordinate the work.",
+                        ]
+                    ),
+                    encoding="utf-8",
+                )
+
+                team = cli._load_team_config(team_file)
+                self.assertEqual(team.pattern, "group-chat")
+                self.assertEqual(team.agents[0].name, "Test Agent")
+
+                bad_team_file = temp_path / "bad-team.yaml"
+                bad_team_file.write_text(
+                    "\n".join(
+                        [
+                            "name: Broken Team",
+                            "agents:",
+                            f"  - file: .\\{agent_file.name}",
+                            "    name: Invalid mix",
+                            "prompt: |",
+                            "  Broken.",
+                        ]
+                    ),
+                    encoding="utf-8",
+                )
+
+                empty_agents_file = temp_path / "empty-team.yaml"
+                empty_agents_file.write_text(
+                    "\n".join(
+                        [
+                            "name: Empty Team",
+                            "agents: []",
+                            "prompt: |",
+                            "  Nothing to do.",
+                        ]
+                    ),
+                    encoding="utf-8",
+                )
+
+                with self.assertRaisesRegex(cli.FtryCliError, "Agent file not found"):
+                    cli._load_agent_config(temp_path / "missing.yaml")
+                with self.assertRaisesRegex(cli.FtryCliError, "`file` references cannot be mixed with inline fields"):
+                    cli._load_team_config(bad_team_file)
+                with self.assertRaisesRegex(cli.FtryCliError, "Invalid or missing `agents` list"):
+                    cli._load_team_config(empty_agents_file)
+
+    def test_create_openai_agent_and_controller_agent_apply_team_context(self) -> None:
+        self._reset_fakes()
+        module_patch, _, _ = self._patch_agent_framework()
+        agent_config = self._make_agent_config(name="Runner", description="Executes prompts.", instructions="Run it.")
+        team = self._make_team_config(
+            agent_config,
+            name="Better Prompt team",
+            instructions="Use {participants}.\n{roles}",
+            with_model=True,
+        )
+
+        with patch.dict(sys.modules, module_patch, clear=False):
+            created_agent = cli._create_openai_agent(
+                agent_config,
+                extra_instructions="Shared context",
+                name_override="Runner-2",
+            )
+            self.assertIsInstance(created_agent, FakeAgent)
+            self.assertEqual(created_agent.name, "Runner-2")
+            self.assertIn("<TeamContext>", created_agent.instructions)
+            self.assertIn("Shared context", created_agent.instructions)
+
+            controller = cli._create_team_controller_agent(team, instructions=cli._render_team_instructions(team))
+            self.assertIsInstance(controller, FakeAgent)
+            self.assertEqual(controller.name, "Better-Prompt-team")
+            self.assertEqual(cli._create_team_controller_agent(self._make_team_config(agent_config), instructions="ctx"), None)
+
+    def test_build_team_participants_and_workflows_cover_pattern_specific_logic(self) -> None:
+        self._reset_fakes()
+        module_patch, _, _ = self._patch_agent_framework()
+        duplicate_a = self._make_agent_config(name="Agent", instructions="Do A.")
+        duplicate_b = self._make_agent_config(name="Agent", instructions="Do B.")
+        router = self._make_agent_config(name="Router", description="Route the request.", instructions="Triage the task.")
+        specialist = self._make_agent_config(name="Specialist", instructions="Answer the request.")
+
+        with patch.dict(os.environ, {"OAI_API_KEY": "secret-key"}, clear=False), patch.dict(sys.modules, module_patch, clear=False):
+            participants, author_name_map = cli._build_team_participants(
+                self._make_team_config(duplicate_a, duplicate_b, router, instructions="Use {participants}."),
+                extra_instructions="Shared context",
+            )
+            self.assertEqual([participant.name for participant in participants], ["Agent", "Agent-2", "Router"])
+            self.assertEqual(author_name_map["Agent-2"], "Agent")
+            self.assertIn("<TeamContext>", participants[0].instructions)
+            self.assertEqual(cli._select_handoff_start_agent(participants).name, "Router")
+            self.assertEqual(
+                cli._count_assistant_messages(
+                    [
+                        types.SimpleNamespace(role="assistant"),
+                        types.SimpleNamespace(role="user"),
+                        types.SimpleNamespace(role="assistant"),
+                    ]
+                ),
+                2,
+            )
+
+            cli._build_team_workflow(
+                self._make_team_config(duplicate_a, specialist, pattern="sequential", name="Pipeline", instructions="First draft, then refine.")
+            )
+            self.assertTrue(FakeSequentialBuilder.last_kwargs["intermediate_outputs"])
+
+            cli._build_team_workflow(
+                self._make_team_config(duplicate_a, specialist, pattern="concurrent", name="Swarm", instructions="Work in parallel.")
+            )
+            self.assertTrue(FakeConcurrentBuilder.last_kwargs["intermediate_outputs"])
+
+            cli._build_team_workflow(
+                self._make_team_config(
+                    router,
+                    specialist,
+                    pattern="handoff",
+                    name="Triage",
+                    instructions="Route and handoff.",
+                    max_turns=3,
+                )
+            )
+            self.assertEqual(FakeHandoffBuilder.last_start_agent.name, "Router")
+            self.assertEqual(FakeHandoffBuilder.last_autonomous_kwargs["turn_limits"]["Router"], 3)
+            self.assertTrue(callable(FakeHandoffBuilder.last_termination_condition))
+
+            cli._build_team_workflow(
+                self._make_team_config(
+                    duplicate_a,
+                    specialist,
+                    pattern="group-chat",
+                    name="Workshop",
+                    instructions="Discuss together.",
+                    with_model=True,
+                    max_turns=5,
+                )
+            )
+            self.assertEqual(FakeGroupChatBuilder.last_kwargs["max_rounds"], 5)
+            self.assertIsInstance(FakeGroupChatBuilder.last_kwargs["orchestrator_agent"], FakeAgent)
+
+            cli._build_team_workflow(
+                self._make_team_config(
+                    duplicate_a,
+                    specialist,
+                    pattern="magentic",
+                    name="Planner",
+                    instructions="Plan and replan a complex task.",
+                    with_model=True,
+                    max_turns=4,
+                )
+            )
+            self.assertEqual(FakeMagenticBuilder.last_kwargs["max_round_count"], 4)
+            self.assertIsInstance(FakeMagenticBuilder.last_kwargs["manager_agent"], FakeAgent)
+
+    def test_run_team_prompt_handles_handoff_event_stream(self) -> None:
+        self._reset_fakes()
+        module_patch, _, _ = self._patch_agent_framework()
+        stderr = io.StringIO()
+        team = self._make_team_config(
+            self._make_agent_config(name="Router", description="Route the request.", instructions="Triage the task."),
+            self._make_agent_config(name="Specialist", description="Handles the final answer.", instructions="Solve the task."),
+            name="Handoff squad",
+            instructions="Route the request and handoff to specialists.",
+            pattern="handoff",
+            max_turns=2,
+        )
+
+        with (
+            patch.dict(os.environ, {"OAI_API_KEY": "secret-key"}, clear=False),
+            patch.dict(sys.modules, module_patch, clear=False),
+            redirect_stderr(stderr),
+        ):
+            output = asyncio.run(cli._run_team_prompt(team, "Route this request"))
+
+        self.assertEqual(output, "[Specialist]\nhandoff:Route this request")
+        plain_stderr = _strip_ansi(stderr.getvalue())
+        self.assertIn("TEAM Handoff squad | pattern: handoff | input:", plain_stderr)
+        self.assertIn("Router --> Specialist | input:", plain_stderr)
+        self.assertIn("TEAM Handoff squad <-- Specialist | final-output:", plain_stderr)
+
+    def test_main_reports_errors_and_direct_pop_requires_a_source(self) -> None:
+        with self.assertRaisesRegex(cli.FtryCliError, "Either `-a/--agent-file` or `-t/--team-file` must be provided."):
+            cli._run_pop_command(None, None, "Bonjour")
+
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            exit_code = cli.main(["pop", "-a", "missing.yaml", "-p", "Bonjour"])
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("Error: Agent file not found:", stderr.getvalue())
 
     def test_build_parser_parses_pop_arguments(self) -> None:
         args = cli.build_parser().parse_args(["pop", "-a", r"samples\poete.yaml", "-p", "Bonjour"])
@@ -630,6 +1119,7 @@ class CliTests(unittest.TestCase):
         fake_openai_module = types.ModuleType("agent_framework.openai")
         fake_openai_module.OpenAIChatCompletionClient = FakeOpenAIChatCompletionClient
         stdout = io.StringIO()
+        stderr = io.StringIO()
 
         with TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
@@ -659,6 +1149,7 @@ class CliTests(unittest.TestCase):
                 ),
                 patch("ftry.cli.Path.cwd", return_value=temp_path),
                 redirect_stdout(stdout),
+                redirect_stderr(stderr),
             ):
                 exit_code = cli.main(["pop", "-a", str(agent_file), "-p", "Ecris un poeme sur la pluie"])
 

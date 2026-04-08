@@ -58,3 +58,35 @@ Ensuite, la commande est disponible dans le terminal:
 ```powershell
 ftry break
 ```
+
+## Tests
+
+Installer les dependances de test:
+
+```powershell
+python -m pip install -e .[test]
+```
+
+Lancer les tests unitaires avec le coverage affiche a la fin:
+
+```powershell
+python .\tests\run_unit_tests.py
+```
+
+Lancer les tests end-to-end de la CLI avec coverage:
+
+```powershell
+python .\tests\run_e2e_tests.py
+```
+
+Lancer toute la suite avec un coverage combine (unitaires + end-to-end):
+
+```powershell
+python .\tests\run_all_tests.py
+```
+
+Lancer toute la suite sans coverage:
+
+```powershell
+python -m unittest discover -s tests -q
+```
