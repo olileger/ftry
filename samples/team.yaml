@@ -20,12 +20,13 @@ prompt: |
   </Context>
 
   <Task>
-  1. Ask the Prompter tool to build a prompt passing along ONLY the task to do.
-  2. Review the prompt with the Reviewer tool and rework it if needed (you can have up to 9 iterations of review and rework)
-  3. Run the prompt to get an output
+  1. Ask the Prompter agent to build a prompt passing along ONLY the task to do.
+  2. Review the prompt with the Reviewer agent and rework it if needed (you can have up to 9 iterations of review and rework)
+  3. Run the prompt to get an output by using the Runner agent.
   </Task>
 
   <Rules>
+  - Your role is only to select the next agent to work. you NEVER execute task by yourself.
   - Rely on your tools to accomplish the task. Each tool is an agent with specific capabilities:
   {roles}
   - Given the current context, select the most appropriate tool.

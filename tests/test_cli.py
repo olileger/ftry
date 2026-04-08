@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import os
+import re
 import sys
 import tempfile
 import types
@@ -12,6 +13,10 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from ftry import cli
+
+
+def _strip_ansi(text: str) -> str:
+    return re.sub(r"\x1b\[[0-9;]*m", "", text)
 
 
 class FakeResult:
@@ -59,27 +64,139 @@ class FakeWorkflowResult:
         self.messages = messages
 
 
-class FakeWorkflowAgent:
-    last_prompt: str | None = None
+class FakeWorkflowEvent:
+    def __init__(self, type: str, data: object = None, executor_id: str | None = None) -> None:
+        self.type = type
+        self.data = data
+        self.executor_id = executor_id
 
-    def __init__(self, workflow: "FakeWorkflow", name: str | None = None) -> None:
-        self.workflow = workflow
-        self.name = name
 
-    async def run(self, prompt: str) -> FakeWorkflowResult:
-        FakeWorkflowAgent.last_prompt = prompt
-        return FakeWorkflowResult(
-            [FakeWorkflowMessage("assistant", f"{self.workflow.pattern}:{prompt}", author_name=self.name)]
-        )
+class FakeGroupChatRequestSentEvent:
+    def __init__(self, participant_name: str) -> None:
+        self.participant_name = participant_name
+
+
+class FakeGroupChatResponseReceivedEvent:
+    def __init__(self, participant_name: str) -> None:
+        self.participant_name = participant_name
+
+
+class FakeHandoffSentEvent:
+    def __init__(self, source: str, target: str) -> None:
+        self.source = source
+        self.target = target
+
+
+class FakeWorkflowStream:
+    def __init__(self, events: list[FakeWorkflowEvent]) -> None:
+        self._events = events
+        self._index = 0
+
+    def __aiter__(self) -> "FakeWorkflowStream":
+        return self
+
+    async def __anext__(self) -> FakeWorkflowEvent:
+        if self._index >= len(self._events):
+            raise StopAsyncIteration
+        event = self._events[self._index]
+        self._index += 1
+        return event
 
 
 class FakeWorkflow:
+    last_prompt: str | None = None
+
     def __init__(self, pattern: str, **kwargs: object) -> None:
         self.pattern = pattern
         self.kwargs = kwargs
 
-    def as_agent(self, name: str | None = None) -> FakeWorkflowAgent:
-        return FakeWorkflowAgent(self, name=name)
+    def _participant_names(self) -> list[str]:
+        participants = self.kwargs.get("participants", [])
+        return [participant.name for participant in participants]
+
+    def _team_name(self) -> str:
+        if self.pattern == "group-chat":
+            orchestrator_name = self.kwargs.get("orchestrator_name")
+            if isinstance(orchestrator_name, str) and orchestrator_name:
+                return orchestrator_name.replace(" ", "-")
+            orchestrator = self.kwargs.get("orchestrator_agent")
+            return getattr(orchestrator, "name", "team")
+        if self.pattern == "magentic":
+            manager = self.kwargs.get("manager_agent")
+            return getattr(manager, "name", "team")
+        participant_names = self._participant_names()
+        if participant_names:
+            return participant_names[-1]
+        return "team"
+
+    def run(self, prompt: str, *, stream: bool = False) -> FakeWorkflowStream:
+        FakeWorkflow.last_prompt = prompt
+        assert stream is True
+
+        participant_names = self._participant_names()
+        events: list[FakeWorkflowEvent] = []
+
+        if self.pattern == "group-chat" and len(participant_names) >= 2:
+            first, second = participant_names[:2]
+            events.extend(
+                [
+                    FakeWorkflowEvent("group_chat", FakeGroupChatRequestSentEvent(first)),
+                    FakeWorkflowEvent("executor_invoked", executor_id=first),
+                    FakeWorkflowEvent(
+                        "output",
+                        FakeWorkflowResult([FakeWorkflowMessage("assistant", "Draft prompt", author_name=first)]),
+                        executor_id=first,
+                    ),
+                    FakeWorkflowEvent("group_chat", FakeGroupChatResponseReceivedEvent(first)),
+                    FakeWorkflowEvent("group_chat", FakeGroupChatRequestSentEvent(second)),
+                    FakeWorkflowEvent("executor_invoked", executor_id=second),
+                    FakeWorkflowEvent(
+                        "output",
+                        FakeWorkflowResult([FakeWorkflowMessage("assistant", "Review feedback", author_name=second)]),
+                        executor_id=second,
+                    ),
+                ]
+            )
+        elif self.pattern == "handoff" and len(participant_names) >= 2:
+            source, target = participant_names[:2]
+            events.extend(
+                [
+                    FakeWorkflowEvent("executor_invoked", executor_id=source),
+                    FakeWorkflowEvent(
+                        "output",
+                        FakeWorkflowResult([FakeWorkflowMessage("assistant", "Initial triage", author_name=source)]),
+                        executor_id=source,
+                    ),
+                    FakeWorkflowEvent("handoff_sent", FakeHandoffSentEvent(source, target)),
+                    FakeWorkflowEvent("executor_invoked", executor_id=target),
+                    FakeWorkflowEvent(
+                        "output",
+                        FakeWorkflowResult([FakeWorkflowMessage("assistant", "Specialist answer", author_name=target)]),
+                        executor_id=target,
+                    ),
+                ]
+            )
+        else:
+            for participant_name in participant_names:
+                events.append(FakeWorkflowEvent("executor_invoked", executor_id=participant_name))
+                events.append(
+                    FakeWorkflowEvent(
+                        "output",
+                        FakeWorkflowResult(
+                            [FakeWorkflowMessage("assistant", f"{participant_name} handled {prompt}", author_name=participant_name)]
+                        ),
+                        executor_id=participant_name,
+                    )
+                )
+
+        events.append(
+            FakeWorkflowEvent(
+                "output",
+                [FakeWorkflowMessage("assistant", f"{self.pattern}:{prompt}", author_name=self._team_name())],
+                executor_id=self._team_name(),
+            )
+        )
+        return FakeWorkflowStream(events)
 
 
 class FakeSequentialBuilder:
@@ -223,12 +340,28 @@ class CliTests(unittest.TestCase):
         self.assertEqual(cli._sanitize_agent_name("agent/triage<v1>"), "agent-triage-v1")
         self.assertEqual(cli._sanitize_agent_name("   "), "agent")
 
+    def test_summarize_trace_text_preserves_useful_newlines(self) -> None:
+        self.assertEqual(
+            cli._summarize_trace_text("# Type of problemCe sujet demande un poeme."),
+            "# Type of problem\nCe sujet demande un poeme.",
+        )
+
+    def test_trace_block_indents_multiline_text(self) -> None:
+        self.assertEqual(cli._trace_block("a\nb"), "\n\ta\n\tb")
+
+    def test_build_agent_trace_colors_assigns_stable_colors(self) -> None:
+        colors = cli._build_agent_trace_colors(["Prompter", "Reviewer", "Runner", "Prompter"])
+        self.assertEqual(colors["Prompter"], cli.BRIGHT_PINK)
+        self.assertEqual(colors["Reviewer"], cli.BRIGHT_BLUE)
+        self.assertEqual(colors["Runner"], cli.PURPLE)
+
     def test_pop_runs_agent_loaded_from_yaml(self) -> None:
         agent_file = self._write_agent_file()
         fake_package = types.ModuleType("agent_framework")
         fake_openai_module = types.ModuleType("agent_framework.openai")
         fake_openai_module.OpenAIChatCompletionClient = FakeOpenAIChatCompletionClient
         stdout = io.StringIO()
+        stderr = io.StringIO()
 
         try:
             with (
@@ -239,6 +372,7 @@ class CliTests(unittest.TestCase):
                     clear=False,
                 ),
                 redirect_stdout(stdout),
+                redirect_stderr(stderr),
             ):
                 exit_code = cli.main(["pop", "-a", agent_file, "-p", "Ecris un poeme sur la pluie"])
         finally:
@@ -252,6 +386,9 @@ class CliTests(unittest.TestCase):
         self.assertEqual(FakeOpenAIChatCompletionClient.last_agent.name, "Poete")
         self.assertEqual(FakeOpenAIChatCompletionClient.last_agent.instructions, "Tu es un poete.")
         self.assertEqual(FakeAgent.last_prompt, "Ecris un poeme sur la pluie")
+        plain_stderr = _strip_ansi(stderr.getvalue())
+        self.assertIn("TRACE AGENT Poete | input:", plain_stderr)
+        self.assertIn("TRACE AGENT Poete | output:", plain_stderr)
 
     def test_pop_runs_team_loaded_from_yaml_file_references(self) -> None:
         fake_package = types.ModuleType("agent_framework")
@@ -264,6 +401,7 @@ class CliTests(unittest.TestCase):
         fake_orchestrations_module.HandoffBuilder = FakeHandoffBuilder
         fake_orchestrations_module.MagenticBuilder = FakeMagenticBuilder
         stdout = io.StringIO()
+        stderr = io.StringIO()
 
         with TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
@@ -325,12 +463,13 @@ class CliTests(unittest.TestCase):
                     clear=False,
                 ),
                 redirect_stdout(stdout),
+                redirect_stderr(stderr),
             ):
                 exit_code = cli.main(["pop", "-t", str(team_file), "-p", "Ameliore ce prompt"])
 
         self.assertEqual(exit_code, 0)
         self.assertEqual(stdout.getvalue().strip(), "[Better Prompt team]\ngroup-chat:Ameliore ce prompt")
-        self.assertEqual(FakeWorkflowAgent.last_prompt, "Ameliore ce prompt")
+        self.assertEqual(FakeWorkflow.last_prompt, "Ameliore ce prompt")
         self.assertIsNotNone(FakeGroupChatBuilder.last_kwargs)
         self.assertEqual(FakeGroupChatBuilder.last_kwargs["max_rounds"], 10)
         orchestrator_agent = FakeGroupChatBuilder.last_kwargs["orchestrator_agent"]
@@ -338,6 +477,10 @@ class CliTests(unittest.TestCase):
         self.assertEqual(orchestrator_agent.name, "Better-Prompt-team")
         self.assertIn("Prompter, Reviewer, Runner", orchestrator_agent.instructions)
         self.assertIn("- Prompter: Builds prompts.", orchestrator_agent.instructions)
+        plain_stderr = _strip_ansi(stderr.getvalue())
+        self.assertIn("TRACE TEAM Better Prompt team | pattern: group-chat | input:", plain_stderr)
+        self.assertIn("TRACE TEAM Better Prompt team --> Prompter | input:", plain_stderr)
+        self.assertIn("TRACE TEAM Better Prompt team <-- Prompter | output:", plain_stderr)
 
     def test_pop_runs_team_loaded_from_project_relative_file_references(self) -> None:
         fake_package = types.ModuleType("agent_framework")
@@ -350,6 +493,7 @@ class CliTests(unittest.TestCase):
         fake_orchestrations_module.HandoffBuilder = FakeHandoffBuilder
         fake_orchestrations_module.MagenticBuilder = FakeMagenticBuilder
         stdout = io.StringIO()
+        stderr = io.StringIO()
 
         with TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
@@ -402,6 +546,7 @@ class CliTests(unittest.TestCase):
                         clear=False,
                     ),
                     redirect_stdout(stdout),
+                    redirect_stderr(stderr),
                 ):
                     exit_code = cli.main(["pop", "-t", r".\samples\team.yaml", "-p", "Ameliore ce prompt"])
             finally:
@@ -409,6 +554,7 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         self.assertEqual(stdout.getvalue().strip(), "[Better Prompt team]\ngroup-chat:Ameliore ce prompt")
+        self.assertIn("TRACE TEAM Better Prompt team | pattern: group-chat | input:", _strip_ansi(stderr.getvalue()))
 
     def test_pop_runs_team_with_inline_agents_and_sequential_pattern(self) -> None:
         fake_package = types.ModuleType("agent_framework")
@@ -421,6 +567,7 @@ class CliTests(unittest.TestCase):
         fake_orchestrations_module.HandoffBuilder = FakeHandoffBuilder
         fake_orchestrations_module.MagenticBuilder = FakeMagenticBuilder
         stdout = io.StringIO()
+        stderr = io.StringIO()
 
         with TemporaryDirectory() as temp_dir:
             team_file = Path(temp_dir) / "team-inline.yaml"
@@ -462,16 +609,21 @@ class CliTests(unittest.TestCase):
                     clear=False,
                 ),
                 redirect_stdout(stdout),
+                redirect_stderr(stderr),
             ):
                 exit_code = cli.main(["pop", "-t", str(team_file), "-p", "Sujet"])
 
         self.assertEqual(exit_code, 0)
-        self.assertEqual(stdout.getvalue().strip(), "[Pipeline team]\nsequential:Sujet")
+        self.assertEqual(stdout.getvalue().strip(), "[Writer]\nsequential:Sujet")
         self.assertIsNotNone(FakeSequentialBuilder.last_kwargs)
         participants = FakeSequentialBuilder.last_kwargs["participants"]
         self.assertEqual(len(participants), 2)
         self.assertIn("<TeamContext>", participants[0].instructions)
         self.assertIn("First gather the facts", participants[0].instructions)
+        plain_stderr = _strip_ansi(stderr.getvalue())
+        self.assertIn("TRACE TEAM Pipeline team --> Researcher | input:", plain_stderr)
+        self.assertIn("TRACE Writer <-- Researcher | output:", plain_stderr)
+        self.assertIn("TRACE TEAM Pipeline team <-- Writer | final-output:", plain_stderr)
 
     def test_pop_loads_api_key_from_dotenv_file(self) -> None:
         fake_package = types.ModuleType("agent_framework")

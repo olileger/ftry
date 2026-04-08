@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import argparse
+import logging
 import os
 import re
 import sys
@@ -21,6 +22,8 @@ BRIGHT_GREEN = "\033[92m"
 BRIGHT_PINK = "\033[95m"
 PURPLE = "\033[38;5;141m"
 ORANGE = "\033[38;5;214m"
+TRACE_LOGGER_NAME = "ftry.trace"
+AGENT_TRACE_COLORS = (BRIGHT_PINK, BRIGHT_BLUE, PURPLE, ORANGE, BRIGHT_GREEN, BRIGHT_YELLOW)
 
 MOCK_COMMANDS = ("build", "break", "land")
 LINE_COLOR_TOKENS = {
@@ -222,6 +225,224 @@ def _sanitize_agent_name(value: str, *, fallback_prefix: str = "agent") -> str:
     return sanitized or fallback_prefix
 
 
+def _ensure_trace_logger() -> logging.Logger:
+    logger = logging.getLogger(TRACE_LOGGER_NAME)
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+
+    if not logger.handlers:
+        handler = logging.StreamHandler(sys.stderr)
+        handler.setFormatter(logging.Formatter("TRACE %(message)s"))
+        logger.addHandler(handler)
+
+    for handler in logger.handlers:
+        if isinstance(handler, logging.StreamHandler):
+            handler.setStream(sys.stderr)
+
+    return logger
+
+
+def _trace(message: str, *args: object) -> None:
+    _ensure_trace_logger().info(message, *args)
+
+
+def _colorize(text: str, color: str) -> str:
+    return f"{color}{text}{RESET}"
+
+
+def _trace_block(text: str) -> str:
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    indented = normalized.replace("\n", "\n\t")
+    return f"\n\t{indented}"
+
+
+def _display_name(name: str | None, author_name_map: Mapping[str, str] | None = None) -> str:
+    if not isinstance(name, str) or not name.strip():
+        return "unknown"
+    if author_name_map is None:
+        return name
+    return author_name_map.get(name, name)
+
+
+def _build_agent_trace_colors(agent_names: Sequence[str]) -> dict[str, str]:
+    colors: dict[str, str] = {}
+    palette_size = len(AGENT_TRACE_COLORS)
+    for index, agent_name in enumerate(agent_names):
+        colors.setdefault(agent_name, AGENT_TRACE_COLORS[index % palette_size])
+    return colors
+
+
+def _trace_team_label(team_name: str) -> str:
+    return _colorize(f"TEAM {team_name}", BRIGHT_CYAN)
+
+
+def _trace_node_label(
+    name: str,
+    *,
+    team_name: str,
+    agent_trace_colors: Mapping[str, str],
+) -> str:
+    if name == team_name:
+        return _trace_team_label(name)
+    return _trace_agent_label(name, agent_trace_colors)
+
+
+def _trace_agent_label(agent_name: str, agent_trace_colors: Mapping[str, str]) -> str:
+    return _colorize(agent_name, agent_trace_colors.get(agent_name, BRIGHT_PINK))
+
+
+def _trace_team_start(team_name: str, pattern: str, prompt: str) -> None:
+    _trace('%s | pattern: %s | input:%s', _trace_team_label(team_name), pattern, _trace_block(prompt))
+
+
+def _trace_route(
+    source_name: str,
+    target_name: str,
+    payload: str,
+    *,
+    team_name: str,
+    agent_trace_colors: Mapping[str, str],
+) -> None:
+    _trace(
+        '%s %s %s | input:%s',
+        _trace_node_label(source_name, team_name=team_name, agent_trace_colors=agent_trace_colors),
+        _colorize("-->", BRIGHT_YELLOW),
+        _trace_node_label(target_name, team_name=team_name, agent_trace_colors=agent_trace_colors),
+        _trace_block(payload),
+    )
+
+
+def _trace_result(
+    receiver_name: str,
+    producer_name: str,
+    payload: str,
+    *,
+    team_name: str,
+    agent_trace_colors: Mapping[str, str],
+    field_name: str = "output",
+) -> None:
+    _trace(
+        '%s %s %s | %s:%s',
+        _trace_node_label(receiver_name, team_name=team_name, agent_trace_colors=agent_trace_colors),
+        _colorize("<--", BRIGHT_GREEN),
+        _trace_node_label(producer_name, team_name=team_name, agent_trace_colors=agent_trace_colors),
+        field_name,
+        _trace_block(payload),
+    )
+
+
+def _trace_agent_start(agent_name: str, prompt: str) -> None:
+    agent_trace_colors = _build_agent_trace_colors([agent_name])
+    _trace('%s | input:%s', _colorize(f"AGENT {agent_name}", agent_trace_colors[agent_name]), _trace_block(prompt))
+
+
+def _trace_agent_output(agent_name: str, output: str) -> None:
+    agent_trace_colors = _build_agent_trace_colors([agent_name])
+    _trace('%s | output:%s', _colorize(f"AGENT {agent_name}", agent_trace_colors[agent_name]), _trace_block(output))
+
+
+def _extract_message_text(message: Any) -> str:
+    text = getattr(message, "text", None)
+    if isinstance(text, str) and text.strip():
+        return text.strip()
+
+    contents = getattr(message, "contents", None)
+    if not isinstance(contents, list):
+        return ""
+
+    rendered_parts: list[str] = []
+    for content in contents:
+        if isinstance(content, str):
+            rendered_parts.append(content)
+            continue
+
+        content_text = getattr(content, "text", None)
+        if isinstance(content_text, str):
+            rendered_parts.append(content_text)
+
+    return "".join(rendered_parts).strip()
+
+
+def _extract_messages(payload: Any) -> list[Any]:
+    if isinstance(payload, list):
+        return payload
+
+    messages = getattr(payload, "messages", None)
+    if isinstance(messages, list):
+        return messages
+
+    return []
+
+
+def _summarize_trace_text(text: str, *, max_length: int = 240) -> str:
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    normalized = re.sub(r"(?m)(^#{1,6} [^\n]*[a-zà-ÿ])(?=[A-ZÀ-ÖØ-Þ])", r"\1\n", normalized)
+    normalized = "\n".join(re.sub(r"[ \t]+", " ", line).strip() for line in normalized.split("\n"))
+    normalized = re.sub(r"\n{3,}", "\n\n", normalized).strip()
+    if len(normalized) <= max_length:
+        return normalized
+    return f"{normalized[: max_length - 3]}..."
+
+
+def _summarize_payload(payload: Any, *, author_name_map: Mapping[str, str] | None = None) -> str:
+    text = getattr(payload, "text", None)
+    if isinstance(text, str) and text.strip():
+        return _summarize_trace_text(text)
+
+    messages = _extract_messages(payload)
+    rendered: list[str] = []
+    for message in messages:
+        message_text = _extract_message_text(message)
+        if not message_text or getattr(message, "role", None) == "user":
+            continue
+
+        author_name = _display_name(getattr(message, "author_name", None), author_name_map)
+        rendered.append(f"[{author_name}] {message_text}")
+
+    if rendered:
+        return _summarize_trace_text("\n\n".join(rendered))
+
+    return _summarize_trace_text(str(payload))
+
+
+def _extract_trace_chunk(payload: Any) -> str:
+    text = getattr(payload, "text", None)
+    if isinstance(text, str):
+        return text
+
+    messages = _extract_messages(payload)
+    rendered: list[str] = []
+    for message in messages:
+        if getattr(message, "role", None) == "user":
+            continue
+        message_text = _extract_message_text(message)
+        if message_text:
+            rendered.append(message_text)
+
+    if rendered:
+        return "\n\n".join(rendered)
+
+    return str(payload)
+
+
+def _format_final_team_output(payload: Any, *, author_name_map: Mapping[str, str] | None = None) -> str:
+    messages = _extract_messages(payload)
+    if messages:
+        for message in reversed(messages):
+            if getattr(message, "role", None) == "user":
+                continue
+            message_text = _extract_message_text(message)
+            if not message_text:
+                continue
+            author_name = getattr(message, "author_name", None)
+            if isinstance(author_name, str) and author_name.strip():
+                display_name = _display_name(author_name.strip(), author_name_map)
+                return f"[{display_name}]\n{message_text}"
+            return message_text
+
+    return _format_agent_output(payload, author_name_map=author_name_map)
+
+
 def _resolve_config_path(config_file: str | Path, *, base_dir: Path | None = None) -> Path:
     config_path = Path(config_file).expanduser()
     if config_path.is_absolute() or base_dir is None:
@@ -381,13 +602,13 @@ def _format_agent_output(result: object, *, author_name_map: Mapping[str, str] |
     if isinstance(text, str) and text.strip():
         return text.strip()
 
-    messages = getattr(result, "messages", None)
-    if isinstance(messages, list):
+    messages = _extract_messages(result)
+    if messages:
         rendered_messages: list[str] = []
         for message in messages:
-            message_text = getattr(message, "text", None)
+            message_text = _extract_message_text(message)
             message_role = getattr(message, "role", None)
-            if not isinstance(message_text, str) or not message_text.strip() or message_role == "user":
+            if not message_text or message_role == "user":
                 continue
 
             author_name = getattr(message, "author_name", None)
@@ -432,8 +653,11 @@ def _create_openai_agent(
 
 async def _run_openai_agent(config: AgentConfig, prompt: str) -> str:
     agent = _create_openai_agent(config)
+    _trace_agent_start(config.name, prompt)
     result = await agent.run(prompt)
-    return _format_agent_output(result)
+    rendered_output = _format_agent_output(result)
+    _trace_agent_output(config.name, _summarize_trace_text(rendered_output))
+    return rendered_output
 
 
 async def _run_agent_prompt(config: AgentConfig, prompt: str) -> str:
@@ -520,13 +744,22 @@ def _build_team_workflow(team: TeamConfig) -> tuple[str, Any, Mapping[str, str]]
         extra_instructions=rendered_instructions if inject_team_context else None,
     )
     SequentialBuilder, ConcurrentBuilder, HandoffBuilder, GroupChatBuilder, MagenticBuilder = _load_orchestration_builders()
-    author_name_map[_sanitize_agent_name(team.name, fallback_prefix="team")] = team.name
+    team_internal_name = _sanitize_agent_name(team.name, fallback_prefix="team")
+    author_name_map[team_internal_name] = team.name
 
     if pattern == "sequential":
-        return pattern, SequentialBuilder(participants=participants).build(), author_name_map
+        return (
+            pattern,
+            SequentialBuilder(participants=participants, intermediate_outputs=True).build(),
+            author_name_map,
+        )
 
     if pattern == "concurrent":
-        return pattern, ConcurrentBuilder(participants=participants).build(), author_name_map
+        return (
+            pattern,
+            ConcurrentBuilder(participants=participants, intermediate_outputs=True).build(),
+            author_name_map,
+        )
 
     if pattern == "handoff":
         handoff_builder = HandoffBuilder(name=team.name, participants=participants, description=team.description)
@@ -544,7 +777,9 @@ def _build_team_workflow(team: TeamConfig) -> tuple[str, Any, Mapping[str, str]]
         group_chat_builder = GroupChatBuilder(
             participants=participants,
             orchestrator_agent=_create_team_controller_agent(team, instructions=rendered_instructions),
+            orchestrator_name=team.name,
             max_rounds=team.termination.max_turns,
+            intermediate_outputs=True,
         )
         return pattern, group_chat_builder.build(), author_name_map
 
@@ -554,6 +789,7 @@ def _build_team_workflow(team: TeamConfig) -> tuple[str, Any, Mapping[str, str]]
             participants=participants,
             manager_agent=_create_team_controller_agent(team, instructions=rendered_instructions),
             max_round_count=team.termination.max_turns,
+            intermediate_outputs=True,
         ).build(),
         author_name_map,
     )
@@ -561,9 +797,135 @@ def _build_team_workflow(team: TeamConfig) -> tuple[str, Any, Mapping[str, str]]
 
 async def _run_team_prompt(team: TeamConfig, prompt: str) -> str:
     _, workflow, author_name_map = _build_team_workflow(team)
-    team_agent = workflow.as_agent(name=_sanitize_agent_name(team.name, fallback_prefix="team"))
-    result = await team_agent.run(prompt)
-    return _format_agent_output(result, author_name_map=author_name_map)
+    pattern = _infer_team_pattern(team)
+    team_name = team.name
+    agent_trace_colors = _build_agent_trace_colors([agent.name for agent in team.agents])
+    last_visible_input = prompt
+    final_payload: Any = None
+    active_executor: str | None = None
+    buffered_outputs: list[str] = []
+    expected_invoked_executor: str | None = None
+    last_agent_output: str | None = None
+    last_agent_name: str | None = None
+    last_route_source = team_name
+
+    def flush_buffer(*, next_executor: str | None = None) -> None:
+        nonlocal last_visible_input, active_executor, buffered_outputs, last_agent_output, last_agent_name, last_route_source
+        if active_executor is None or not buffered_outputs:
+            active_executor = next_executor
+            buffered_outputs = []
+            return
+
+        aggregated_output = _summarize_trace_text("".join(buffered_outputs), max_length=600)
+        result_target = team_name if pattern in {"group-chat", "concurrent", "magentic"} else (next_executor or team_name)
+        _trace_result(
+            result_target,
+            active_executor,
+            aggregated_output,
+            team_name=team_name,
+            agent_trace_colors=agent_trace_colors,
+        )
+        last_visible_input = aggregated_output
+        last_agent_name = active_executor
+        last_agent_output = aggregated_output
+        last_route_source = active_executor if pattern in {"sequential", "handoff"} else team_name
+        active_executor = next_executor
+        buffered_outputs = []
+
+    _trace_team_start(team_name, pattern, prompt)
+
+    stream = workflow.run(prompt, stream=True)
+    async for event in stream:
+        if event.type == "group_chat":
+            participant_name = _display_name(getattr(event.data, "participant_name", None), author_name_map)
+            event_type = type(event.data).__name__
+            if "RequestSent" in event_type:
+                expected_invoked_executor = participant_name
+                flush_buffer(next_executor=participant_name)
+                _trace_route(
+                    team_name,
+                    participant_name,
+                    _summarize_trace_text(last_visible_input),
+                    team_name=team_name,
+                    agent_trace_colors=agent_trace_colors,
+                )
+                last_route_source = team_name
+            continue
+
+        if event.type == "handoff_sent":
+            source = _display_name(getattr(event.data, "source", None), author_name_map)
+            target = _display_name(getattr(event.data, "target", None), author_name_map)
+            expected_invoked_executor = target
+            flush_buffer(next_executor=target)
+            _trace_route(
+                source,
+                target,
+                _summarize_trace_text(last_visible_input),
+                team_name=team_name,
+                agent_trace_colors=agent_trace_colors,
+            )
+            last_route_source = source
+            continue
+
+        if event.type == "executor_invoked" and event.executor_id:
+            invoked_executor = _display_name(event.executor_id, author_name_map)
+            if pattern in {"group-chat", "handoff"} and expected_invoked_executor is not None:
+                if invoked_executor != expected_invoked_executor:
+                    continue
+                expected_invoked_executor = None
+
+            flush_buffer(next_executor=invoked_executor)
+            if pattern == "sequential":
+                _trace_route(
+                    last_route_source,
+                    invoked_executor,
+                    _summarize_trace_text(last_visible_input),
+                    team_name=team_name,
+                    agent_trace_colors=agent_trace_colors,
+                )
+                last_route_source = invoked_executor
+            elif pattern in {"concurrent", "magentic"}:
+                _trace_route(
+                    team_name,
+                    invoked_executor,
+                    _summarize_trace_text(last_visible_input),
+                    team_name=team_name,
+                    agent_trace_colors=agent_trace_colors,
+                )
+                last_route_source = team_name
+            continue
+
+        if event.type == "output":
+            final_payload = event.data
+            output_summary = _summarize_payload(event.data, author_name_map=author_name_map)
+            if output_summary:
+                producer = _display_name(event.executor_id, author_name_map)
+                if producer == team_name:
+                    flush_buffer(next_executor=producer)
+                    last_visible_input = output_summary
+                else:
+                    if active_executor is None:
+                        active_executor = producer
+                    if active_executor != producer:
+                        flush_buffer(next_executor=producer)
+                    raw_chunk = _extract_trace_chunk(event.data)
+                    if raw_chunk:
+                        buffered_outputs.append(raw_chunk)
+
+    flush_buffer()
+    rendered_output = _format_final_team_output(final_payload, author_name_map=author_name_map)
+    if last_agent_output and last_agent_name:
+        _trace_result(
+            team_name,
+            last_agent_name,
+            _summarize_trace_text(last_agent_output),
+            team_name=team_name,
+            agent_trace_colors=agent_trace_colors,
+            field_name="final-output",
+        )
+    else:
+        _trace('%s | final-output:%s', _trace_team_label(team_name), _trace_block(_summarize_trace_text(rendered_output)))
+    return rendered_output
 
 
 def _run_pop_command(agent_file: str | None, team_file: str | None, prompt: str) -> int:
