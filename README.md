@@ -1,10 +1,10 @@
 # ftry
 
-CLI minimale nommee `ftry`.
+Minimal CLI named `ftry`.
 
-## Commandes disponibles
+## Available commands
 
-Les commandes sont pour l'instant des mocks, sauf `line` et `pop`.
+For now, the commands are mocks, except for `line` and `pop`.
 
 - `ftry build`
 - `ftry break`
@@ -12,48 +12,48 @@ Les commandes sont pour l'instant des mocks, sauf `line` et `pop`.
 - `ftry land`
 - `ftry line`
 
-Exemple:
+Example:
 
 ```powershell
 ftry build
 ```
 
-Sortie:
+Output:
 
 ```text
 build
 ```
 
-La commande `ftry line` charge son rendu depuis `src\ftry\line.txt`. Pour changer le visuel, il suffit donc de modifier ce fichier.
+The `ftry line` command loads its output from `src\ftry\line.txt`. To change the visual output, simply edit that file.
 
-La commande `ftry pop` charge soit un agent (`-a`), soit une team d'agents (`-t`) depuis un fichier YAML, envoie le prompt passe avec `-p`, puis affiche la reponse du modele.
+The `ftry pop` command loads either an agent (`-a`) or a team of agents (`-t`) from a YAML file, sends the prompt passed with `-p`, then displays the model response.
 
-Exemple:
+Example:
 
 ```
-ftry pop -a .\samples\poete.yaml -p "Ecris un poeme sur la pluie"
+ftry pop -a .\samples\poete.yaml -p "Write a poem about rain"
 ```
 
-Exemple team:
+Team example:
 
 ```powershell
-ftry pop -t .\samples\team.yaml -p "Construis un meilleur prompt pour resumer ce texte"
+ftry pop -t .\samples\team.yaml -p "Build a better prompt to summarize this text"
 ```
 
-## Installation locale
+## Local installation
 
-Prerequis:
+Prerequisites:
 
-- Python 3.10 ou plus recent
+- Python 3.10 or newer
 - `pip`
 
-Depuis la racine du projet, installer la CLI en mode local editable:
+From the project root, install the CLI in editable local mode:
 
 ```powershell
 python -m pip install -e .
 ```
 
-Ensuite, la commande est disponible dans le terminal:
+Then the command is available in the terminal:
 
 ```powershell
 ftry break
@@ -61,13 +61,13 @@ ftry break
 
 ## Tests
 
-Installer les dependances de test:
+Install the test dependencies:
 
 ```powershell
 python -m pip install -e .[test]
 ```
 
-Lancer les tests unitaires avec le coverage affiche a la fin:
+Run the unit tests with coverage displayed at the end:
 
 ```powershell
 .\tests\unit.bat
@@ -77,7 +77,7 @@ Lancer les tests unitaires avec le coverage affiche a la fin:
 ./tests/unit.sh
 ```
 
-Lancer les tests end-to-end de la CLI avec coverage:
+Run the CLI end-to-end tests with coverage:
 
 ```powershell
 .\tests\e2e.bat
@@ -87,7 +87,7 @@ Lancer les tests end-to-end de la CLI avec coverage:
 ./tests/e2e.sh
 ```
 
-Lancer toute la suite avec un coverage combine (unitaires + end-to-end):
+Run the full suite with combined coverage (unit + end-to-end):
 
 ```powershell
 .\tests\all.bat
@@ -97,7 +97,7 @@ Lancer toute la suite avec un coverage combine (unitaires + end-to-end):
 ./tests/all.sh
 ```
 
-Lancer toute la suite sans coverage:
+Run the full suite without coverage:
 
 ```powershell
 python -m unittest discover -s tests -q
