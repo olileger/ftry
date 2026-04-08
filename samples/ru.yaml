@@ -1,0 +1,15 @@
+name: Runner
+
+description: |
+  The Runner executes a prompt given at the runtime.
+  It is responsible for generating the output based on the prompt and output it.
+  
+model:
+  name: gpt-4o-2024-08-06
+  provider: openai
+  api-key: env:OAI_API_KEY
+
+prompt: |
+  <Context>
+  You're an assistant who is knowledgeable on any topics.
+  </Context>
