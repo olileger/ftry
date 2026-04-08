@@ -26,12 +26,18 @@ build
 
 La commande `ftry line` charge son rendu depuis `src\ftry\line.txt`. Pour changer le visuel, il suffit donc de modifier ce fichier.
 
-La commande `ftry pop` charge un agent depuis un fichier YAML, envoie le prompt passe avec `-p`, puis affiche la reponse du modele.
+La commande `ftry pop` charge soit un agent (`-a`), soit une team d'agents (`-t`) depuis un fichier YAML, envoie le prompt passe avec `-p`, puis affiche la reponse du modele.
 
 Exemple:
 
 ```
 ftry pop -a .\samples\poete.yaml -p "Ecris un poeme sur la pluie"
+```
+
+Exemple team:
+
+```powershell
+ftry pop -t .\samples\team.yaml -p "Construis un meilleur prompt pour resumer ce texte"
 ```
 
 ## Installation locale
