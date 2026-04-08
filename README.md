@@ -70,19 +70,31 @@ python -m pip install -e .[test]
 Lancer les tests unitaires avec le coverage affiche a la fin:
 
 ```powershell
-python .\tests\run_unit_tests.py
+.\tests\unit.bat
+```
+
+```sh
+./tests/unit.sh
 ```
 
 Lancer les tests end-to-end de la CLI avec coverage:
 
 ```powershell
-python .\tests\run_e2e_tests.py
+.\tests\e2e.bat
+```
+
+```sh
+./tests/e2e.sh
 ```
 
 Lancer toute la suite avec un coverage combine (unitaires + end-to-end):
 
 ```powershell
-python .\tests\run_all_tests.py
+.\tests\all.bat
+```
+
+```sh
+./tests/all.sh
 ```
 
 Lancer toute la suite sans coverage:

@@ -37,7 +37,7 @@ def discover_tests() -> unittest.TestSuite:
 def cleanup_coverage_files() -> None:
     for path in REPO_ROOT.glob(".coverage*"):
         if path.is_file():
-            path.unlink()
+            path.unlink(missing_ok=True)
 
 
 def run_suite_with_coverage(
