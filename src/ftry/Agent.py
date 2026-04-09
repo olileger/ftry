@@ -36,6 +36,9 @@ class AgentConfig:
     description: str | None = None
 
 
+_OPENAI_PROVIDER = "openai"
+
+
 def _parse_model_config(raw_model: Any, *, config_kind: str, required: bool) -> AgentModelConfig | None:
     if raw_model is None and not required:
         return None
@@ -91,7 +94,7 @@ def _create_openai_agent(
 
     instructions = config.instructions
     if extra_instructions:
-        instructions = f"{config.instructions}\n\n<TeamContext>\n{extra_instructions}\n</TeamContext>"
+        instructions = f"{instructions}\n\n<TeamContext>\n{extra_instructions}\n</TeamContext>"
 
     return OpenAIChatCompletionClient(
         model=config.model.name,
@@ -114,7 +117,9 @@ async def _run_openai_agent(config: AgentConfig, prompt: str) -> str:
 
 async def _run_agent_prompt(config: AgentConfig, prompt: str) -> str:
     provider = config.model.provider.lower()
-    if provider != "openai":
-        raise FtryCliError(f"Unsupported provider `{config.model.provider}`. Only `openai` is supported for now.")
+    if provider != _OPENAI_PROVIDER:
+        raise FtryCliError(
+            f"Unsupported provider `{config.model.provider}`. Only `{_OPENAI_PROVIDER}` is supported for now."
+        )
 
     return await _run_openai_agent(config, prompt)
