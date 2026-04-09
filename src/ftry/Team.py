@@ -64,6 +64,10 @@ GROUP_CHAT_HINTS = (
 )
 SEQUENTIAL_HINTS = ("sequential", "sequence", "pipeline", "stage", "step", "first", "then", "finally", "ensuite")
 HANDOFF_START_HINTS = ("triage", "router", "routing", "route", "dispatcher", "coordinator")
+TEAM_CONTEXT_PATTERNS = frozenset({"sequential", "concurrent", "handoff"})
+TEAM_SHARED_RESULT_PATTERNS = frozenset({"group-chat", "concurrent", "magentic"})
+TEAM_REQUEST_DRIVEN_PATTERNS = frozenset({"group-chat", "handoff"})
+TEAM_DIRECT_ROUTE_PATTERNS = frozenset({"concurrent", "magentic"})
 
 
 @dataclass(frozen=True)
@@ -267,10 +271,23 @@ def _build_team_participants(team: TeamConfig, *, extra_instructions: str | None
     return participants, author_name_map
 
 
+def _build_handoff_workflow(team: TeamConfig, *, participants: Sequence[Any], handoff_builder_type: Any) -> Any:
+    handoff_builder = handoff_builder_type(name=team.name, participants=participants, description=team.description)
+    handoff_builder = handoff_builder.with_start_agent(_select_handoff_start_agent(participants))
+    autonomous_kwargs: dict[str, Any] = {"agents": participants}
+    max_turns = team.termination.max_turns
+    if max_turns is not None:
+        autonomous_kwargs["turn_limits"] = {getattr(agent, "name"): max_turns for agent in participants}
+        handoff_builder = handoff_builder.with_termination_condition(
+            lambda conversation, limit=max_turns: _count_assistant_messages(conversation) >= limit
+        )
+    return handoff_builder.with_autonomous_mode(**autonomous_kwargs).build()
+
+
 def _build_team_workflow(team: TeamConfig) -> tuple[str, Any, Mapping[str, str]]:
     pattern = _infer_team_pattern(team)
     rendered_instructions = _render_team_instructions(team)
-    inject_team_context = pattern in {"sequential", "concurrent", "handoff"} or team.model is None
+    inject_team_context = pattern in TEAM_CONTEXT_PATTERNS or team.model is None
     participants, author_name_map = _build_team_participants(
         team,
         extra_instructions=rendered_instructions if inject_team_context else None,
@@ -279,47 +296,32 @@ def _build_team_workflow(team: TeamConfig) -> tuple[str, Any, Mapping[str, str]]
     team_internal_name = _sanitize_agent_name(team.name, fallback_prefix="team")
     author_name_map[team_internal_name] = team.name
 
-    if pattern == "sequential":
-        return (
-            pattern,
-            SequentialBuilder(participants=participants, intermediate_outputs=True).build(),
-            author_name_map,
-        )
-
-    if pattern == "concurrent":
-        return (
-            pattern,
-            ConcurrentBuilder(participants=participants, intermediate_outputs=True).build(),
-            author_name_map,
-        )
+    if pattern in {"sequential", "concurrent"}:
+        builder = {"sequential": SequentialBuilder, "concurrent": ConcurrentBuilder}[pattern]
+        return pattern, builder(participants=participants, intermediate_outputs=True).build(), author_name_map
 
     if pattern == "handoff":
-        handoff_builder = HandoffBuilder(name=team.name, participants=participants, description=team.description)
-        handoff_builder = handoff_builder.with_start_agent(_select_handoff_start_agent(participants))
-        autonomous_kwargs: dict[str, Any] = {"agents": participants}
-        if team.termination.max_turns is not None:
-            autonomous_kwargs["turn_limits"] = {getattr(agent, "name"): team.termination.max_turns for agent in participants}
-            handoff_builder = handoff_builder.with_termination_condition(
-                lambda conversation: _count_assistant_messages(conversation) >= team.termination.max_turns
-            )
-        handoff_builder = handoff_builder.with_autonomous_mode(**autonomous_kwargs)
-        return pattern, handoff_builder.build(), author_name_map
+        return pattern, _build_handoff_workflow(team, participants=participants, handoff_builder_type=HandoffBuilder), author_name_map
 
+    controller_agent = _create_team_controller_agent(team, instructions=rendered_instructions)
     if pattern == "group-chat":
-        group_chat_builder = GroupChatBuilder(
-            participants=participants,
-            orchestrator_agent=_create_team_controller_agent(team, instructions=rendered_instructions),
-            orchestrator_name=team.name,
-            max_rounds=team.termination.max_turns,
-            intermediate_outputs=True,
+        return (
+            pattern,
+            GroupChatBuilder(
+                participants=participants,
+                orchestrator_agent=controller_agent,
+                orchestrator_name=team.name,
+                max_rounds=team.termination.max_turns,
+                intermediate_outputs=True,
+            ).build(),
+            author_name_map,
         )
-        return pattern, group_chat_builder.build(), author_name_map
 
     return (
         pattern,
         MagenticBuilder(
             participants=participants,
-            manager_agent=_create_team_controller_agent(team, instructions=rendered_instructions),
+            manager_agent=controller_agent,
             max_round_count=team.termination.max_turns,
             intermediate_outputs=True,
         ).build(),
@@ -327,134 +329,159 @@ def _build_team_workflow(team: TeamConfig) -> tuple[str, Any, Mapping[str, str]]
     )
 
 
-async def _run_team_prompt(team: TeamConfig, prompt: str) -> str:
-    _, workflow, author_name_map = _build_team_workflow(team)
-    pattern = _infer_team_pattern(team)
-    team_name = team.name
-    agent_trace_colors = _build_agent_trace_colors([agent.name for agent in team.agents])
-    last_visible_input = prompt
+@dataclass
+class _TeamTraceState:
+    pattern: str
+    team_name: str
+    agent_trace_colors: Mapping[str, str]
+    last_visible_input: str
     final_payload: Any = None
     active_executor: str | None = None
-    buffered_outputs: list[str] = []
+    buffered_outputs: list[str] = field(default_factory=list)
     expected_invoked_executor: str | None = None
     last_agent_output: str | None = None
     last_agent_name: str | None = None
-    last_route_source = team_name
+    last_route_source: str = ""
 
-    def flush_buffer(*, next_executor: str | None = None) -> None:
-        nonlocal last_visible_input, active_executor, buffered_outputs, last_agent_output, last_agent_name, last_route_source
-        if active_executor is None or not buffered_outputs:
-            active_executor = next_executor
-            buffered_outputs = []
+    def __post_init__(self) -> None:
+        self.last_route_source = self.team_name
+
+    def flush_buffer(self, *, next_executor: str | None = None) -> None:
+        if self.active_executor is None or not self.buffered_outputs:
+            self.active_executor = next_executor
+            self.buffered_outputs.clear()
             return
 
-        aggregated_output = _summarize_trace_text("".join(buffered_outputs), max_length=600)
-        result_target = team_name if pattern in {"group-chat", "concurrent", "magentic"} else (next_executor or team_name)
+        aggregated_output = _summarize_trace_text("".join(self.buffered_outputs), max_length=600)
+        result_target = self.team_name if self.pattern in TEAM_SHARED_RESULT_PATTERNS else (next_executor or self.team_name)
         _trace_result(
             result_target,
-            active_executor,
+            self.active_executor,
             aggregated_output,
-            team_name=team_name,
-            agent_trace_colors=agent_trace_colors,
+            team_name=self.team_name,
+            agent_trace_colors=self.agent_trace_colors,
         )
-        last_visible_input = aggregated_output
-        last_agent_name = active_executor
-        last_agent_output = aggregated_output
-        last_route_source = active_executor if pattern in {"sequential", "handoff"} else team_name
-        active_executor = next_executor
-        buffered_outputs = []
+        self.last_visible_input = aggregated_output
+        self.last_agent_name = self.active_executor
+        self.last_agent_output = aggregated_output
+        self.last_route_source = self.active_executor if self.pattern in {"sequential", "handoff"} else self.team_name
+        self.active_executor = next_executor
+        self.buffered_outputs.clear()
 
-    _trace_team_start(team_name, pattern, prompt)
+    def trace_route(self, source_name: str, target_name: str) -> None:
+        _trace_route(
+            source_name,
+            target_name,
+            _summarize_trace_text(self.last_visible_input),
+            team_name=self.team_name,
+            agent_trace_colors=self.agent_trace_colors,
+        )
+
+    def trace_final_output(self, rendered_output: str) -> None:
+        if self.last_agent_output and self.last_agent_name:
+            _trace_result(
+                self.team_name,
+                self.last_agent_name,
+                _summarize_trace_text(self.last_agent_output),
+                team_name=self.team_name,
+                agent_trace_colors=self.agent_trace_colors,
+                field_name="final-output",
+            )
+            return
+
+        _trace('%s | final-output:%s', _trace_team_label(self.team_name), _trace_block(_summarize_trace_text(rendered_output)))
+
+
+def _handle_group_chat_event(event: Any, state: _TeamTraceState, author_name_map: Mapping[str, str]) -> None:
+    participant_name = _display_name(getattr(event.data, "participant_name", None), author_name_map)
+    if "RequestSent" not in type(event.data).__name__:
+        return
+
+    state.expected_invoked_executor = participant_name
+    state.flush_buffer(next_executor=participant_name)
+    state.trace_route(state.team_name, participant_name)
+    state.last_route_source = state.team_name
+
+
+def _handle_handoff_event(event: Any, state: _TeamTraceState, author_name_map: Mapping[str, str]) -> None:
+    source = _display_name(getattr(event.data, "source", None), author_name_map)
+    target = _display_name(getattr(event.data, "target", None), author_name_map)
+    state.expected_invoked_executor = target
+    state.flush_buffer(next_executor=target)
+    state.trace_route(source, target)
+    state.last_route_source = source
+
+
+def _handle_executor_invoked_event(event: Any, state: _TeamTraceState, author_name_map: Mapping[str, str]) -> None:
+    if not event.executor_id:
+        return
+
+    invoked_executor = _display_name(event.executor_id, author_name_map)
+    if state.pattern in TEAM_REQUEST_DRIVEN_PATTERNS and state.expected_invoked_executor is not None:
+        if invoked_executor != state.expected_invoked_executor:
+            return
+        state.expected_invoked_executor = None
+
+    state.flush_buffer(next_executor=invoked_executor)
+    if state.pattern == "sequential":
+        state.trace_route(state.last_route_source, invoked_executor)
+        state.last_route_source = invoked_executor
+    elif state.pattern in TEAM_DIRECT_ROUTE_PATTERNS:
+        state.trace_route(state.team_name, invoked_executor)
+        state.last_route_source = state.team_name
+
+
+def _handle_output_event(event: Any, state: _TeamTraceState, author_name_map: Mapping[str, str]) -> None:
+    state.final_payload = event.data
+    output_summary = _summarize_payload(event.data, author_name_map=author_name_map)
+    if not output_summary:
+        return
+
+    producer = _display_name(event.executor_id, author_name_map)
+    if producer == state.team_name:
+        state.flush_buffer(next_executor=producer)
+        state.last_visible_input = output_summary
+        return
+
+    if state.active_executor is None:
+        state.active_executor = producer
+    elif state.active_executor != producer:
+        state.flush_buffer(next_executor=producer)
+
+    raw_chunk = _extract_trace_chunk(event.data)
+    if raw_chunk:
+        state.buffered_outputs.append(raw_chunk)
+
+
+async def _run_team_prompt(team: TeamConfig, prompt: str) -> str:
+    pattern, workflow, author_name_map = _build_team_workflow(team)
+    state = _TeamTraceState(
+        pattern=pattern,
+        team_name=team.name,
+        agent_trace_colors=_build_agent_trace_colors([agent.name for agent in team.agents]),
+        last_visible_input=prompt,
+    )
+
+    _trace_team_start(state.team_name, state.pattern, prompt)
 
     stream = workflow.run(prompt, stream=True)
     async for event in stream:
         if event.type == "group_chat":
-            participant_name = _display_name(getattr(event.data, "participant_name", None), author_name_map)
-            event_type = type(event.data).__name__
-            if "RequestSent" in event_type:
-                expected_invoked_executor = participant_name
-                flush_buffer(next_executor=participant_name)
-                _trace_route(
-                    team_name,
-                    participant_name,
-                    _summarize_trace_text(last_visible_input),
-                    team_name=team_name,
-                    agent_trace_colors=agent_trace_colors,
-                )
-                last_route_source = team_name
+            _handle_group_chat_event(event, state, author_name_map)
             continue
 
         if event.type == "handoff_sent":
-            source = _display_name(getattr(event.data, "source", None), author_name_map)
-            target = _display_name(getattr(event.data, "target", None), author_name_map)
-            expected_invoked_executor = target
-            flush_buffer(next_executor=target)
-            _trace_route(
-                source,
-                target,
-                _summarize_trace_text(last_visible_input),
-                team_name=team_name,
-                agent_trace_colors=agent_trace_colors,
-            )
-            last_route_source = source
+            _handle_handoff_event(event, state, author_name_map)
             continue
 
-        if event.type == "executor_invoked" and event.executor_id:
-            invoked_executor = _display_name(event.executor_id, author_name_map)
-            if pattern in {"group-chat", "handoff"} and expected_invoked_executor is not None:
-                if invoked_executor != expected_invoked_executor:
-                    continue
-                expected_invoked_executor = None
-
-            flush_buffer(next_executor=invoked_executor)
-            if pattern == "sequential":
-                _trace_route(
-                    last_route_source,
-                    invoked_executor,
-                    _summarize_trace_text(last_visible_input),
-                    team_name=team_name,
-                    agent_trace_colors=agent_trace_colors,
-                )
-                last_route_source = invoked_executor
-            elif pattern in {"concurrent", "magentic"}:
-                _trace_route(
-                    team_name,
-                    invoked_executor,
-                    _summarize_trace_text(last_visible_input),
-                    team_name=team_name,
-                    agent_trace_colors=agent_trace_colors,
-                )
-                last_route_source = team_name
+        if event.type == "executor_invoked":
+            _handle_executor_invoked_event(event, state, author_name_map)
             continue
 
         if event.type == "output":
-            final_payload = event.data
-            output_summary = _summarize_payload(event.data, author_name_map=author_name_map)
-            if output_summary:
-                producer = _display_name(event.executor_id, author_name_map)
-                if producer == team_name:
-                    flush_buffer(next_executor=producer)
-                    last_visible_input = output_summary
-                else:
-                    if active_executor is None:
-                        active_executor = producer
-                    if active_executor != producer:
-                        flush_buffer(next_executor=producer)
-                    raw_chunk = _extract_trace_chunk(event.data)
-                    if raw_chunk:
-                        buffered_outputs.append(raw_chunk)
+            _handle_output_event(event, state, author_name_map)
 
-    flush_buffer()
-    rendered_output = _format_final_team_output(final_payload, author_name_map=author_name_map)
-    if last_agent_output and last_agent_name:
-        _trace_result(
-            team_name,
-            last_agent_name,
-            _summarize_trace_text(last_agent_output),
-            team_name=team_name,
-            agent_trace_colors=agent_trace_colors,
-            field_name="final-output",
-        )
-    else:
-        _trace('%s | final-output:%s', _trace_team_label(team_name), _trace_block(_summarize_trace_text(rendered_output)))
+    state.flush_buffer()
+    rendered_output = _format_final_team_output(state.final_payload, author_name_map=author_name_map)
+    state.trace_final_output(rendered_output)
     return rendered_output
