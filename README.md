@@ -1,5 +1,7 @@
 # ftry
 
+![Coverage](https://img.shields.io/badge/coverage-94%25-brightgreen)
+
 Minimal CLI named `ftry`.
 
 ## Available commands
@@ -70,31 +72,31 @@ python -m pip install -e .[test]
 Run the unit tests with coverage displayed at the end:
 
 ```powershell
-.\tests\unit.bat
+.\tests\windows\unit.bat
 ```
 
 ```sh
-./tests/unit.sh
+./tests/linux/unit.sh
 ```
 
 Run the CLI end-to-end tests with coverage:
 
 ```powershell
-.\tests\e2e.bat
+.\tests\windows\e2e.bat
 ```
 
 ```sh
-./tests/e2e.sh
+./tests/linux/e2e.sh
 ```
 
 Run the full suite with combined coverage (unit + end-to-end):
 
 ```powershell
-.\tests\all.bat
+.\tests\windows\all.bat
 ```
 
 ```sh
-./tests/all.sh
+./tests/linux/all.sh
 ```
 
 Run the full suite without coverage:
