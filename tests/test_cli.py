@@ -54,6 +54,11 @@ class FakeOpenAIChatCompletionClient:
         return agent
 
 
+class FakeTtyStream(io.StringIO):
+    def isatty(self) -> bool:
+        return True
+
+
 class FakeWorkflowMessage:
     def __init__(self, role: str, text: str, author_name: str | None = None) -> None:
         self.role = role
@@ -922,6 +927,30 @@ class CliTests(unittest.TestCase):
         self.assertEqual(colors["Prompter"], cli.BRIGHT_PINK)
         self.assertEqual(colors["Reviewer"], cli.BRIGHT_BLUE)
         self.assertEqual(colors["Runner"], cli.PURPLE)
+
+    def test_render_pop_animation_only_runs_in_a_tty(self) -> None:
+        non_tty_stream = io.StringIO()
+        cli._render_pop_animation(stream=non_tty_stream, sleep=lambda _: self.fail("sleep should not be called"))
+        self.assertEqual(non_tty_stream.getvalue(), "")
+
+        tty_stream = FakeTtyStream()
+        delays: list[float] = []
+
+        cli._render_pop_animation(stream=tty_stream, sleep=delays.append)
+
+        rendered = tty_stream.getvalue()
+        plain_rendered = _strip_ansi(rendered)
+        self.assertTrue(rendered.startswith(cli.POP_ANIMATION_CURSOR_HIDE))
+        self.assertTrue(rendered.endswith(f"\n{cli.POP_ANIMATION_CURSOR_SHOW}"))
+        self.assertIn(cli.BRIGHT_PINK, rendered)
+        self.assertIn(cli.POP_ANIMATION_POP_LINES[0], plain_rendered)
+        self.assertIn("         .  .", plain_rendered)
+        self.assertIn(r"         \______/>", plain_rendered)
+        self.assertIn("          o    o", plain_rendered)
+        self.assertIn("_" * 40, plain_rendered)
+        self.assertIn(cli.POP_ANIMATION_CLEAR_LINE, rendered)
+        self.assertNotIn(f"{cli.POP_ANIMATION_CLEAR_LINE}{cli.POP_ANIMATION_CURSOR_SHOW}", rendered)
+        self.assertEqual(delays, [cli.POP_ANIMATION_STEP_SECONDS] * len(cli.POP_ANIMATION_FRAMES))
 
     def test_pop_runs_agent_loaded_from_yaml(self) -> None:
         agent_file = self._write_agent_file()
