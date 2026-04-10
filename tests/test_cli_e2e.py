@@ -314,10 +314,10 @@ class CliEndToEndTests(unittest.TestCase):
         )
 
         self.assertEqual(result.returncode, 0, msg=result.stderr)
-        self.assertIn("Poete:Ecris un poeme sur la pluie", result.stdout)
+        self.assertEqual(result.stdout.strip(), "")
         plain_stderr = _strip_ansi(result.stderr)
         self.assertIn("AGENT Poete | input:", plain_stderr)
-        self.assertIn("AGENT Poete | output:", plain_stderr)
+        self.assertIn("AGENT Poete | final-output:", plain_stderr)
 
     def test_pop_team_sample_runs_end_to_end_with_samples_and_dotenv(self) -> None:
         result = self._run_cli(

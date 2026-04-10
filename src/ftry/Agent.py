@@ -15,7 +15,6 @@ from .Tools import (
     _resolve_config_path,
     _resolve_secret,
     _sanitize_agent_name,
-    _summarize_trace_text,
     _trace_agent_output,
     _trace_agent_start,
 )
@@ -111,7 +110,7 @@ async def _run_openai_agent(config: AgentConfig, prompt: str) -> str:
     _trace_agent_start(config.name, prompt)
     result = await agent.run(prompt)
     rendered_output = _format_agent_output(result)
-    _trace_agent_output(config.name, _summarize_trace_text(rendered_output))
+    _trace_agent_output(config.name, rendered_output, field_name="final-output")
     return rendered_output
 
 

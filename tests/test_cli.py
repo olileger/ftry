@@ -920,7 +920,7 @@ class CliTests(unittest.TestCase):
             Path(agent_file).unlink(missing_ok=True)
 
         self.assertEqual(exit_code, 0)
-        self.assertEqual(stdout.getvalue().strip(), "Poeme genere")
+        self.assertEqual(stdout.getvalue().strip(), "")
         self.assertEqual(FakeOpenAIChatCompletionClient.last_model, "gpt-4o-2024-08-06")
         self.assertEqual(FakeOpenAIChatCompletionClient.last_api_key, "secret-key")
         self.assertIsNotNone(FakeOpenAIChatCompletionClient.last_agent)
@@ -929,7 +929,8 @@ class CliTests(unittest.TestCase):
         self.assertEqual(FakeAgent.last_prompt, "Ecris un poeme sur la pluie")
         plain_stderr = _strip_ansi(stderr.getvalue())
         self.assertIn("AGENT Poete | input:", plain_stderr)
-        self.assertIn("AGENT Poete | output:", plain_stderr)
+        self.assertIn("AGENT Poete | final-output:", plain_stderr)
+        self.assertIn("Poeme genere", plain_stderr)
 
     def test_pop_runs_team_loaded_from_yaml_file_references(self) -> None:
         fake_package = types.ModuleType("agent_framework")
@@ -1206,7 +1207,7 @@ class CliTests(unittest.TestCase):
                 exit_code = cli.main(["pop", "-a", str(agent_file), "-p", "Ecris un poeme sur la pluie"])
 
         self.assertEqual(exit_code, 0)
-        self.assertEqual(stdout.getvalue().strip(), "Poeme genere")
+        self.assertEqual(stdout.getvalue().strip(), "")
         self.assertEqual(FakeOpenAIChatCompletionClient.last_api_key, "dotenv-secret")
 
     def test_pop_returns_error_for_unsupported_provider(self) -> None:

@@ -266,8 +266,8 @@ def _trace_agent_start(agent_name: str, prompt: str) -> None:
     _trace_agent_event(agent_name, TRACE_INPUT_FIELD, prompt)
 
 
-def _trace_agent_output(agent_name: str, output: str) -> None:
-    _trace_agent_event(agent_name, TRACE_OUTPUT_FIELD, output)
+def _trace_agent_output(agent_name: str, output: str, *, field_name: str = TRACE_OUTPUT_FIELD) -> None:
+    _trace_agent_event(agent_name, field_name, output)
 
 
 def _extract_message_text(message: Any) -> str:
