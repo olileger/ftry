@@ -64,6 +64,7 @@ from .Tools import (
     _format_final_team_output,
     _load_dotenv_function,
     _load_line_banner,
+    _load_pop_banner,
     _load_yaml_mapping,
     _load_yaml_module,
     _require_mapping,
@@ -91,16 +92,8 @@ from .Tools import (
 
 MOCK_COMMANDS = ("build", "break", "land")
 POP_ANIMATION_STEP_SECONDS = 0.16
-POP_ANIMATION_TEXT_COLORS = (BRIGHT_PINK, PURPLE, BRIGHT_PINK, ORANGE, BRIGHT_YELLOW, ORANGE)
 POP_ANIMATION_SKATE_COLORS = (ORANGE, PURPLE, BRIGHT_YELLOW)
-POP_ANIMATION_POP_LINES = (
-    " _____    ____    _____ ",
-    "|  __ \\  / __ \\  |  __ \\",
-    "| |__) || |  | | | |__) |",
-    "|  ___/ | |  | | |  ___/ ",
-    "| |     | |__| | | |     ",
-    "|_|      \\____/  |_|     ",
-)
+POP_ANIMATION_BANNER = _load_pop_banner()
 POP_ANIMATION_SKATEBOARD_LINES = (
     "         .  .",
     "         \\______/>",
@@ -142,10 +135,6 @@ def _clear_pop_animation_frame(line_count: int, *, stream: TextIO) -> None:
 
 
 def _build_pop_animation_frame(horizontal_offset: int, vertical_lift: int, max_lift: int) -> str:
-    pop_lines = tuple(
-        _colorize(line, POP_ANIMATION_TEXT_COLORS[index % len(POP_ANIMATION_TEXT_COLORS)])
-        for index, line in enumerate(POP_ANIMATION_POP_LINES)
-    )
     skateboard_lines = tuple(
         f"{' ' * horizontal_offset}{_colorize(line, POP_ANIMATION_SKATE_COLORS[index % len(POP_ANIMATION_SKATE_COLORS)])}"
         for index, line in enumerate(POP_ANIMATION_SKATEBOARD_LINES)
@@ -153,7 +142,7 @@ def _build_pop_animation_frame(horizontal_offset: int, vertical_lift: int, max_l
     ground_line = _colorize(POP_ANIMATION_GROUND, BRIGHT_CYAN)
     top_padding = ("",) * (max_lift - vertical_lift)
     bottom_padding = ("",) * vertical_lift
-    return "\n".join((*pop_lines, "", *top_padding, *skateboard_lines, *bottom_padding, ground_line))
+    return "\n".join((POP_ANIMATION_BANNER, "", *top_padding, *skateboard_lines, *bottom_padding, ground_line))
 
 
 POP_ANIMATION_MAX_LIFT = max(vertical_lift for _, vertical_lift in POP_ANIMATION_FRAME_SPECS)

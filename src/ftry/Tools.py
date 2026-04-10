@@ -50,8 +50,8 @@ class FtryCliError(Exception):
     """Raised when a user-facing CLI error occurs."""
 
 
-def _load_line_banner() -> str:
-    content = files("ftry").joinpath("line.txt").read_text(encoding="utf-8")
+def _load_ascii_banner(file_name: str) -> str:
+    content = files("ftry").joinpath(file_name).read_text(encoding="utf-8")
     rendered_lines: list[str] = []
 
     for raw_line in content.splitlines():
@@ -64,6 +64,14 @@ def _load_line_banner() -> str:
         rendered_lines.append(line)
 
     return "\n".join(rendered_lines).rstrip()
+
+
+def _load_line_banner() -> str:
+    return _load_ascii_banner("line.txt")
+
+
+def _load_pop_banner() -> str:
+    return _load_ascii_banner("pop.txt")
 
 
 def _load_yaml_module() -> Any:

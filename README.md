@@ -29,7 +29,7 @@ build
 The `ftry line` command loads its output from `src\ftry\line.txt`. To change the visual output, simply edit that file.
 
 The `ftry pop` command loads either an agent (`-a`) or a team of agents (`-t`) from a YAML file, sends the prompt passed with `-p`, then displays the model response.
-In an interactive terminal, it plays a slightly longer neon ASCII `POP` skateboard animation before the run starts, reusing the skateboard style from `src\ftry\line.txt` and leaving the final frame visible on screen.
+In an interactive terminal, it plays a slightly longer neon ASCII `POP` skateboard animation before the run starts, loading the static `POP` banner from `src\ftry\pop.txt`, reusing the skateboard style from `src\ftry\line.txt`, and leaving the final frame visible on screen.
 
 Example:
 

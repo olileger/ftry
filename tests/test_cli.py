@@ -943,7 +943,7 @@ class CliTests(unittest.TestCase):
         self.assertTrue(rendered.startswith(cli.POP_ANIMATION_CURSOR_HIDE))
         self.assertTrue(rendered.endswith(f"\n{cli.POP_ANIMATION_CURSOR_SHOW}"))
         self.assertIn(cli.BRIGHT_PINK, rendered)
-        self.assertIn(cli.POP_ANIMATION_POP_LINES[0], plain_rendered)
+        self.assertIn(_strip_ansi(cli._load_pop_banner()).splitlines()[0], plain_rendered)
         self.assertIn("         .  .", plain_rendered)
         self.assertIn(r"         \______/>", plain_rendered)
         self.assertIn("          o    o", plain_rendered)
