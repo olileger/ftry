@@ -20,6 +20,16 @@ PURPLE = "\033[38;5;141m"
 ORANGE = "\033[38;5;214m"
 TRACE_LOGGER_NAME = "ftry.trace"
 AGENT_TRACE_COLORS = (BRIGHT_PINK, BRIGHT_BLUE, PURPLE, ORANGE, BRIGHT_GREEN, BRIGHT_YELLOW)
+AGENT_LABEL_PREFIX = "AGENT "
+ELLIPSIS = "..."
+ENV_FILE_NAME = ".env"
+ENV_SECRET_PREFIX = "env:"
+TRACE_INPUT_FIELD = "input"
+TRACE_OUTPUT_FIELD = "output"
+UNKNOWN_DISPLAY_NAME = "unknown"
+USER_ROLE = "user"
+YAML_ROOT_FIELD = "root"
+LINE_RESET_TOKEN = "[reset]"
 
 LINE_COLOR_TOKENS = {
     "[cyan]": BRIGHT_CYAN,
@@ -29,8 +39,9 @@ LINE_COLOR_TOKENS = {
     "[yellow]": BRIGHT_YELLOW,
     "[orange]": ORANGE,
     "[green]": BRIGHT_GREEN,
-    "[reset]": RESET,
+    LINE_RESET_TOKEN: RESET,
 }
+LINE_COLOR_MARKERS = tuple(token for token in LINE_COLOR_TOKENS if token != LINE_RESET_TOKEN)
 
 
 class FtryCliError(Exception):
@@ -43,7 +54,7 @@ def _load_line_banner() -> str:
 
     for raw_line in content.splitlines():
         line = raw_line
-        uses_color = any(token in raw_line for token in LINE_COLOR_TOKENS if token != "[reset]")
+        uses_color = any(token in raw_line for token in LINE_COLOR_MARKERS)
         for token, value in LINE_COLOR_TOKENS.items():
             line = line.replace(token, value)
         if uses_color and not line.endswith(RESET):
@@ -77,18 +88,10 @@ def _load_dotenv_function() -> Callable[..., bool]:
 
 
 def _find_dotenv_path(agent_path: Path) -> Path | None:
-    search_roots = [Path.cwd(), agent_path.resolve().parent]
-
-    seen: set[Path] = set()
-    for root in search_roots:
-        for candidate_dir in (root, *root.parents):
-            if candidate_dir in seen:
-                continue
-            seen.add(candidate_dir)
-
-            candidate = candidate_dir / ".env"
-            if candidate.is_file():
-                return candidate
+    for candidate_dir in _iter_unique_parent_dirs((Path.cwd(), agent_path.resolve().parent)):
+        candidate = candidate_dir / ENV_FILE_NAME
+        if candidate.is_file():
+            return candidate
 
     return None
 
@@ -133,12 +136,12 @@ def _require_positive_int(value: Any, field_name: str, config_kind: str = "agent
 
 
 def _resolve_secret(value: str) -> str:
-    if not value.startswith("env:"):
+    if not value.startswith(ENV_SECRET_PREFIX):
         return value
 
-    env_name = value.removeprefix("env:").strip()
+    env_name = value.removeprefix(ENV_SECRET_PREFIX).strip()
     if not env_name:
-        raise FtryCliError("Invalid `model.api-key`: environment variable name is missing after `env:`.")
+        raise FtryCliError(f"Invalid `model.api-key`: environment variable name is missing after `{ENV_SECRET_PREFIX}`.")
 
     secret = os.getenv(env_name)
     if not secret:
@@ -178,25 +181,26 @@ def _colorize(text: str, color: str) -> str:
 
 
 def _trace_block(text: str) -> str:
-    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    normalized = _normalize_newlines(text)
     indented = normalized.replace("\n", "\n\t")
     return f"\n\t{indented}"
 
 
 def _display_name(name: str | None, author_name_map: Mapping[str, str] | None = None) -> str:
     if not isinstance(name, str) or not name.strip():
-        return "unknown"
+        return UNKNOWN_DISPLAY_NAME
     if author_name_map is None:
         return name
     return author_name_map.get(name, name)
 
 
 def _build_agent_trace_colors(agent_names: Sequence[str]) -> dict[str, str]:
-    colors: dict[str, str] = {}
     palette_size = len(AGENT_TRACE_COLORS)
-    for index, agent_name in enumerate(agent_names):
-        colors.setdefault(agent_name, AGENT_TRACE_COLORS[index % palette_size])
-    return colors
+    unique_agent_names = tuple(dict.fromkeys(agent_names))
+    return {
+        agent_name: AGENT_TRACE_COLORS[index % palette_size]
+        for index, agent_name in enumerate(unique_agent_names)
+    }
 
 
 def _trace_team_label(team_name: str) -> str:
@@ -219,7 +223,7 @@ def _trace_agent_label(agent_name: str, agent_trace_colors: Mapping[str, str]) -
 
 
 def _trace_team_start(team_name: str, pattern: str, prompt: str) -> None:
-    _trace('%s | pattern: %s | input:%s', _trace_team_label(team_name), pattern, _trace_block(prompt))
+    _trace("%s | pattern: %s | %s:%s", _trace_team_label(team_name), pattern, TRACE_INPUT_FIELD, _trace_block(prompt))
 
 
 def _trace_route(
@@ -246,7 +250,7 @@ def _trace_result(
     *,
     team_name: str,
     agent_trace_colors: Mapping[str, str],
-    field_name: str = "output",
+    field_name: str = TRACE_OUTPUT_FIELD,
 ) -> None:
     _trace(
         '%s %s %s | %s:%s',
@@ -259,13 +263,11 @@ def _trace_result(
 
 
 def _trace_agent_start(agent_name: str, prompt: str) -> None:
-    agent_trace_colors = _build_agent_trace_colors([agent_name])
-    _trace('%s | input:%s', _colorize(f"AGENT {agent_name}", f"{BOLD}{agent_trace_colors[agent_name]}"), _trace_block(prompt))
+    _trace_agent_event(agent_name, TRACE_INPUT_FIELD, prompt)
 
 
 def _trace_agent_output(agent_name: str, output: str) -> None:
-    agent_trace_colors = _build_agent_trace_colors([agent_name])
-    _trace('%s | output:%s', _colorize(f"AGENT {agent_name}", f"{BOLD}{agent_trace_colors[agent_name]}"), _trace_block(output))
+    _trace_agent_event(agent_name, TRACE_OUTPUT_FIELD, output)
 
 
 def _extract_message_text(message: Any) -> str:
@@ -277,17 +279,7 @@ def _extract_message_text(message: Any) -> str:
     if not isinstance(contents, list):
         return ""
 
-    rendered_parts: list[str] = []
-    for content in contents:
-        if isinstance(content, str):
-            rendered_parts.append(content)
-            continue
-
-        content_text = getattr(content, "text", None)
-        if isinstance(content_text, str):
-            rendered_parts.append(content_text)
-
-    return "".join(rendered_parts).strip()
+    return "".join(_iter_message_content_text(contents)).strip()
 
 
 def _extract_messages(payload: Any) -> list[Any]:
@@ -302,13 +294,13 @@ def _extract_messages(payload: Any) -> list[Any]:
 
 
 def _summarize_trace_text(text: str, *, max_length: int = 240) -> str:
-    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    normalized = _normalize_newlines(text)
     normalized = re.sub(r"(?m)(^#{1,6} [^\n]*[a-zà-ÿ])(?=[A-ZÀ-ÖØ-Þ])", r"\1\n", normalized)
     normalized = "\n".join(re.sub(r"[ \t]+", " ", line).strip() for line in normalized.split("\n"))
     normalized = re.sub(r"\n{3,}", "\n\n", normalized).strip()
     if len(normalized) <= max_length:
         return normalized
-    return f"{normalized[: max_length - 3]}..."
+    return f"{normalized[: max_length - len(ELLIPSIS)]}{ELLIPSIS}"
 
 
 def _summarize_payload(payload: Any, *, author_name_map: Mapping[str, str] | None = None) -> str:
@@ -316,15 +308,12 @@ def _summarize_payload(payload: Any, *, author_name_map: Mapping[str, str] | Non
     if isinstance(text, str) and text.strip():
         return _summarize_trace_text(text)
 
-    messages = _extract_messages(payload)
-    rendered: list[str] = []
-    for message in messages:
-        message_text = _extract_message_text(message)
-        if not message_text or getattr(message, "role", None) == "user":
-            continue
-
-        author_name = _display_name(getattr(message, "author_name", None), author_name_map)
-        rendered.append(f"[{author_name}] {message_text}")
+    rendered = _render_visible_messages(
+        payload,
+        author_name_map=author_name_map,
+        author_separator=" ",
+        include_unknown_author=True,
+    )
 
     if rendered:
         return _summarize_trace_text("\n\n".join(rendered))
@@ -337,14 +326,7 @@ def _extract_trace_chunk(payload: Any) -> str:
     if isinstance(text, str):
         return text
 
-    messages = _extract_messages(payload)
-    rendered: list[str] = []
-    for message in messages:
-        if getattr(message, "role", None) == "user":
-            continue
-        message_text = _extract_message_text(message)
-        if message_text:
-            rendered.append(message_text)
+    rendered = _collect_visible_message_texts(payload)
 
     if rendered:
         return "\n\n".join(rendered)
@@ -357,41 +339,19 @@ def _format_agent_output(result: object, *, author_name_map: Mapping[str, str] |
     if isinstance(text, str) and text.strip():
         return text.strip()
 
-    messages = _extract_messages(result)
-    if messages:
-        rendered_messages: list[str] = []
-        for message in messages:
-            message_text = _extract_message_text(message)
-            message_role = getattr(message, "role", None)
-            if not message_text or message_role == "user":
-                continue
-
-            author_name = getattr(message, "author_name", None)
-            if isinstance(author_name, str) and author_name.strip():
-                display_name = author_name_map.get(author_name.strip(), author_name.strip()) if author_name_map else author_name.strip()
-                rendered_messages.append(f"[{display_name}]\n{message_text.strip()}")
-            else:
-                rendered_messages.append(message_text.strip())
-
-        if rendered_messages:
-            return "\n\n".join(rendered_messages)
+    rendered_messages = _render_visible_messages(result, author_name_map=author_name_map)
+    if rendered_messages:
+        return "\n\n".join(rendered_messages)
     return str(result)
 
 
 def _format_final_team_output(payload: Any, *, author_name_map: Mapping[str, str] | None = None) -> str:
-    messages = _extract_messages(payload)
-    if messages:
-        for message in reversed(messages):
-            if getattr(message, "role", None) == "user":
-                continue
-            message_text = _extract_message_text(message)
-            if not message_text:
-                continue
-            author_name = getattr(message, "author_name", None)
-            if isinstance(author_name, str) and author_name.strip():
-                display_name = _display_name(author_name.strip(), author_name_map)
-                return f"[{display_name}]\n{message_text}"
-            return message_text
+    visible_messages = _collect_visible_messages(payload)
+    if visible_messages:
+        final_message = visible_messages[-1]
+        rendered_message = _render_message(final_message, author_name_map=author_name_map)
+        if rendered_message is not None:
+            return rendered_message
 
     return _format_agent_output(payload, author_name_map=author_name_map)
 
@@ -411,4 +371,107 @@ def _resolve_config_path(config_file: str | Path, *, base_dir: Path | None = Non
 def _load_yaml_mapping(config_path: Path, *, config_kind: str) -> Mapping[str, Any]:
     yaml = _load_yaml_module()
     raw_config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-    return _require_mapping(raw_config, "root", config_kind)
+    return _require_mapping(raw_config, YAML_ROOT_FIELD, config_kind)
+
+
+def _normalize_newlines(text: str) -> str:
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _iter_unique_parent_dirs(roots: Sequence[Path]) -> Sequence[Path]:
+    seen: set[Path] = set()
+    unique_dirs: list[Path] = []
+    for root in roots:
+        for candidate_dir in (root, *root.parents):
+            if candidate_dir in seen:
+                continue
+            seen.add(candidate_dir)
+            unique_dirs.append(candidate_dir)
+    return unique_dirs
+
+
+def _trace_agent_event(agent_name: str, field_name: str, payload: str) -> None:
+    agent_trace_colors = _build_agent_trace_colors([agent_name])
+    agent_label = _colorize(
+        f"{AGENT_LABEL_PREFIX}{agent_name}",
+        f"{BOLD}{agent_trace_colors[agent_name]}",
+    )
+    _trace("%s | %s:%s", agent_label, field_name, _trace_block(payload))
+
+
+def _iter_message_content_text(contents: Sequence[Any]) -> Sequence[str]:
+    rendered_parts: list[str] = []
+    for content in contents:
+        if isinstance(content, str):
+            rendered_parts.append(content)
+            continue
+
+        content_text = getattr(content, "text", None)
+        if isinstance(content_text, str):
+            rendered_parts.append(content_text)
+    return rendered_parts
+
+
+def _collect_visible_messages(payload: Any) -> list[Any]:
+    return [message for message in _extract_messages(payload) if getattr(message, "role", None) != USER_ROLE]
+
+
+def _collect_visible_message_texts(payload: Any) -> list[str]:
+    return [
+        message_text
+        for message in _collect_visible_messages(payload)
+        if (message_text := _extract_message_text(message))
+    ]
+
+
+def _resolve_message_author(
+    message: Any,
+    *,
+    author_name_map: Mapping[str, str] | None = None,
+    include_unknown_author: bool = False,
+) -> str | None:
+    author_name = getattr(message, "author_name", None)
+    if not include_unknown_author and (not isinstance(author_name, str) or not author_name.strip()):
+        return None
+    return _display_name(author_name, author_name_map)
+
+
+def _render_message(
+    message: Any,
+    *,
+    author_name_map: Mapping[str, str] | None = None,
+    author_separator: str = "\n",
+    include_unknown_author: bool = False,
+) -> str | None:
+    message_text = _extract_message_text(message)
+    if not message_text:
+        return None
+
+    author_name = _resolve_message_author(
+        message,
+        author_name_map=author_name_map,
+        include_unknown_author=include_unknown_author,
+    )
+    if author_name is None:
+        return message_text
+    return f"[{author_name}]{author_separator}{message_text}"
+
+
+def _render_visible_messages(
+    payload: Any,
+    *,
+    author_name_map: Mapping[str, str] | None = None,
+    author_separator: str = "\n",
+    include_unknown_author: bool = False,
+) -> list[str]:
+    rendered_messages: list[str] = []
+    for message in _collect_visible_messages(payload):
+        rendered_message = _render_message(
+            message,
+            author_name_map=author_name_map,
+            author_separator=author_separator,
+            include_unknown_author=include_unknown_author,
+        )
+        if rendered_message is not None:
+            rendered_messages.append(rendered_message)
+    return rendered_messages
