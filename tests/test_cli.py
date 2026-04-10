@@ -770,6 +770,58 @@ class CliTests(unittest.TestCase):
         self.assertIn("Router --> Specialist | input:", plain_stderr)
         self.assertIn("TEAM Handoff squad <-- Specialist | final-output:", plain_stderr)
 
+    def test_run_team_prompt_prefers_last_agent_output_when_team_authors_final_message(self) -> None:
+        self._reset_fakes()
+        module_patch, _, _ = self._patch_agent_framework()
+        stderr = io.StringIO()
+        team = self._make_team_config(
+            self._make_agent_config(name="Prompter", instructions="Draft the prompt."),
+            self._make_agent_config(name="Reviewer", instructions="Review the draft."),
+            name="Better Prompt team",
+            instructions="Discuss together and choose the best prompt.",
+            pattern="group-chat",
+            with_model=True,
+        )
+
+        with (
+            patch.dict(os.environ, {"OAI_API_KEY": "secret-key"}, clear=False),
+            patch.dict(sys.modules, module_patch, clear=False),
+            redirect_stderr(stderr),
+        ):
+            output = asyncio.run(cli._run_team_prompt(team, "Ameliore ce prompt"))
+
+        self.assertEqual(output, "[Better Prompt team]\ngroup-chat:Ameliore ce prompt")
+        plain_stderr = _strip_ansi(stderr.getvalue())
+        final_output_log = plain_stderr.split("TEAM Better Prompt team <-- Reviewer | final-output:", maxsplit=1)[1]
+        self.assertIn("Review feedback", final_output_log)
+        self.assertNotIn("[Better Prompt team]\n\tgroup-chat:Ameliore ce prompt", final_output_log)
+
+    def test_run_team_prompt_logs_full_final_output_without_truncation(self) -> None:
+        self._reset_fakes()
+        module_patch, _, _ = self._patch_agent_framework()
+        stderr = io.StringIO()
+        long_prompt = "x" * 260
+        team = self._make_team_config(
+            self._make_agent_config(name="Researcher", instructions="Gather the facts."),
+            self._make_agent_config(name="Writer", instructions="Write the final answer."),
+            name="Pipeline team",
+            instructions="First gather the facts, then draft the answer, and finally produce the final response.",
+            pattern="sequential",
+        )
+
+        with (
+            patch.dict(os.environ, {"OAI_API_KEY": "secret-key"}, clear=False),
+            patch.dict(sys.modules, module_patch, clear=False),
+            redirect_stderr(stderr),
+        ):
+            output = asyncio.run(cli._run_team_prompt(team, long_prompt))
+
+        self.assertEqual(output, f"[Writer]\nsequential:{long_prompt}")
+        plain_stderr = _strip_ansi(stderr.getvalue())
+        final_output_log = plain_stderr.split("TEAM Pipeline team <-- Writer | final-output:", maxsplit=1)[1]
+        self.assertIn(f"[Writer]\n\tsequential:{long_prompt}", final_output_log)
+        self.assertNotIn(f"sequential:{long_prompt[:237]}...", final_output_log)
+
     def test_main_reports_errors_and_direct_pop_requires_a_source(self) -> None:
         with self.assertRaisesRegex(cli.FtryCliError, "Either `-a/--agent-file` or `-t/--team-file` must be provided."):
             cli._run_pop_command(None, None, "Bonjour")
@@ -957,7 +1009,7 @@ class CliTests(unittest.TestCase):
                 exit_code = cli.main(["pop", "-t", str(team_file), "-p", "Ameliore ce prompt"])
 
         self.assertEqual(exit_code, 0)
-        self.assertEqual(stdout.getvalue().strip(), "[Better Prompt team]\ngroup-chat:Ameliore ce prompt")
+        self.assertEqual(stdout.getvalue().strip(), "")
         self.assertEqual(FakeWorkflow.last_prompt, "Ameliore ce prompt")
         self.assertIsNotNone(FakeGroupChatBuilder.last_kwargs)
         self.assertEqual(FakeGroupChatBuilder.last_kwargs["max_rounds"], 10)
@@ -1042,7 +1094,7 @@ class CliTests(unittest.TestCase):
                 os.chdir(previous_cwd)
 
         self.assertEqual(exit_code, 0)
-        self.assertEqual(stdout.getvalue().strip(), "[Better Prompt team]\ngroup-chat:Ameliore ce prompt")
+        self.assertEqual(stdout.getvalue().strip(), "")
         self.assertIn("TEAM Better Prompt team | pattern: group-chat | input:", _strip_ansi(stderr.getvalue()))
 
     def test_pop_runs_team_with_inline_agents_and_sequential_pattern(self) -> None:
@@ -1103,7 +1155,7 @@ class CliTests(unittest.TestCase):
                 exit_code = cli.main(["pop", "-t", str(team_file), "-p", "Sujet"])
 
         self.assertEqual(exit_code, 0)
-        self.assertEqual(stdout.getvalue().strip(), "[Writer]\nsequential:Sujet")
+        self.assertEqual(stdout.getvalue().strip(), "")
         self.assertIsNotNone(FakeSequentialBuilder.last_kwargs)
         participants = FakeSequentialBuilder.last_kwargs["participants"]
         self.assertEqual(len(participants), 2)

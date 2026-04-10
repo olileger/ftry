@@ -15,6 +15,7 @@ from .Agent import (
 from .Tools import (
     FtryCliError,
     _build_agent_trace_colors,
+    _collect_visible_messages,
     _display_name,
     _extract_trace_chunk,
     _format_final_team_output,
@@ -25,6 +26,7 @@ from .Tools import (
     _require_optional_string,
     _require_positive_int,
     _require_sequence,
+    _resolve_message_author,
     _resolve_config_path,
     _sanitize_agent_name,
     _summarize_payload,
@@ -340,6 +342,7 @@ class _TeamTraceState:
     buffered_outputs: list[str] = field(default_factory=list)
     expected_invoked_executor: str | None = None
     last_agent_output: str | None = None
+    last_agent_full_output: str | None = None
     last_agent_name: str | None = None
     last_route_source: str = ""
 
@@ -352,7 +355,8 @@ class _TeamTraceState:
             self.buffered_outputs.clear()
             return
 
-        aggregated_output = _summarize_trace_text("".join(self.buffered_outputs), max_length=600)
+        full_output = "".join(self.buffered_outputs)
+        aggregated_output = _summarize_trace_text(full_output, max_length=600)
         result_target = self.team_name if self.pattern in TEAM_SHARED_RESULT_PATTERNS else (next_executor or self.team_name)
         _trace_result(
             result_target,
@@ -364,6 +368,7 @@ class _TeamTraceState:
         self.last_visible_input = aggregated_output
         self.last_agent_name = self.active_executor
         self.last_agent_output = aggregated_output
+        self.last_agent_full_output = full_output
         self.last_route_source = self.active_executor if self.pattern in {"sequential", "handoff"} else self.team_name
         self.active_executor = next_executor
         self.buffered_outputs.clear()
@@ -377,19 +382,43 @@ class _TeamTraceState:
             agent_trace_colors=self.agent_trace_colors,
         )
 
-    def trace_final_output(self, rendered_output: str) -> None:
-        if self.last_agent_output and self.last_agent_name:
+    def trace_final_output(self, final_payload: Any, rendered_output: str, author_name_map: Mapping[str, str]) -> None:
+        final_messages = _collect_visible_messages(final_payload)
+        if final_messages:
+            final_author = _resolve_message_author(final_messages[-1], author_name_map=author_name_map)
+            if final_author == self.team_name and self.last_agent_full_output and self.last_agent_name:
+                _trace_result(
+                    self.team_name,
+                    self.last_agent_name,
+                    self.last_agent_full_output,
+                    team_name=self.team_name,
+                    agent_trace_colors=self.agent_trace_colors,
+                    field_name="final-output",
+                )
+                return
+
             _trace_result(
                 self.team_name,
-                self.last_agent_name,
-                _summarize_trace_text(self.last_agent_output),
+                final_author or self.team_name,
+                rendered_output,
                 team_name=self.team_name,
                 agent_trace_colors=self.agent_trace_colors,
                 field_name="final-output",
             )
             return
 
-        _trace('%s | final-output:%s', _trace_team_label(self.team_name), _trace_block(_summarize_trace_text(rendered_output)))
+        if self.last_agent_full_output and self.last_agent_name:
+            _trace_result(
+                self.team_name,
+                self.last_agent_name,
+                self.last_agent_full_output,
+                team_name=self.team_name,
+                agent_trace_colors=self.agent_trace_colors,
+                field_name="final-output",
+            )
+            return
+
+        _trace('%s | final-output:%s', _trace_team_label(self.team_name), _trace_block(rendered_output))
 
 
 def _handle_group_chat_event(event: Any, state: _TeamTraceState, author_name_map: Mapping[str, str]) -> None:
@@ -483,5 +512,5 @@ async def _run_team_prompt(team: TeamConfig, prompt: str) -> str:
 
     state.flush_buffer()
     rendered_output = _format_final_team_output(state.final_payload, author_name_map=author_name_map)
-    state.trace_final_output(rendered_output)
+    state.trace_final_output(state.final_payload, rendered_output, author_name_map)
     return rendered_output

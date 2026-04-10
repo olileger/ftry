@@ -330,7 +330,7 @@ class CliEndToEndTests(unittest.TestCase):
         )
 
         self.assertEqual(result.returncode, 0, msg=result.stderr)
-        self.assertEqual(result.stdout.strip(), "[Better Prompt team]\ngroup-chat:Ameliore ce prompt")
+        self.assertEqual(result.stdout.strip(), "")
         plain_stderr = _strip_ansi(result.stderr)
         self.assertIn("TEAM Better Prompt team | pattern: group-chat | input:", plain_stderr)
         self.assertIn("TEAM Better Prompt team --> Prompter | input:", plain_stderr)

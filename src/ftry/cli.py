@@ -160,7 +160,8 @@ def _load_team_config(team_file: str | Path) -> TeamConfig:
 def _run_pop_command(agent_file: str | None, team_file: str | None, prompt: str) -> int:
     if team_file is not None:
         config = _load_team_config(team_file)
-        result = asyncio.run(_run_team_prompt(config, prompt))
+        asyncio.run(_run_team_prompt(config, prompt))
+        return 0
     else:
         if agent_file is None:
             raise FtryCliError("Either `-a/--agent-file` or `-t/--team-file` must be provided.")
