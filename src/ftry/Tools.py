@@ -29,6 +29,8 @@ TRACE_OUTPUT_FIELD = "output"
 UNKNOWN_DISPLAY_NAME = "unknown"
 USER_ROLE = "user"
 YAML_ROOT_FIELD = "root"
+AGENT_YAML_ROOT_FIELDS = frozenset({"name", "model", "prompt"})
+TEAM_YAML_ROOT_FIELDS = frozenset({"name", "agents", "prompt"})
 LINE_RESET_TOKEN = "[reset]"
 
 LINE_COLOR_TOKENS = {
@@ -368,10 +370,39 @@ def _resolve_config_path(config_file: str | Path, *, base_dir: Path | None = Non
     return config_path
 
 
+def _detect_yaml_config_kind(config: Mapping[str, Any]) -> str | None:
+    root_fields = set(config)
+    if TEAM_YAML_ROOT_FIELDS.issubset(root_fields):
+        return "team"
+    if AGENT_YAML_ROOT_FIELDS.issubset(root_fields) and "agents" not in root_fields:
+        return "agent"
+    return None
+
+
+def _validate_yaml_config_kind(config: Mapping[str, Any], *, config_path: Path, config_kind: str) -> None:
+    actual_kind = _detect_yaml_config_kind(config)
+    if actual_kind is None or actual_kind == config_kind:
+        return
+
+    if config_kind == "agent":
+        raise FtryCliError(
+            f"Invalid agent YAML in `{config_path}`: this file defines `agents` at the root, "
+            "so it is a team configuration. Use `-t/--team-file` instead of `-a/--agent-file`."
+        )
+
+    raise FtryCliError(
+        f"Invalid team YAML in `{config_path}`: this file matches an agent configuration "
+        "(`name`, `model`, `prompt`) and does not define `agents` at the root. "
+        "Use `-a/--agent-file` instead of `-t/--team-file`."
+    )
+
+
 def _load_yaml_mapping(config_path: Path, *, config_kind: str) -> Mapping[str, Any]:
     yaml = _load_yaml_module()
     raw_config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-    return _require_mapping(raw_config, YAML_ROOT_FIELD, config_kind)
+    config = _require_mapping(raw_config, YAML_ROOT_FIELD, config_kind)
+    _validate_yaml_config_kind(config, config_path=config_path, config_kind=config_kind)
+    return config
 
 
 def _normalize_newlines(text: str) -> str:

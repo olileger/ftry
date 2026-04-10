@@ -14,6 +14,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from ftry import cli
+from ftry.Tools import _detect_yaml_config_kind
 
 
 def _strip_ansi(text: str) -> str:
@@ -846,6 +847,32 @@ class CliTests(unittest.TestCase):
         self.assertEqual(args.team_file, r"samples\team.yaml")
         self.assertIsNone(args.agent_file)
         self.assertEqual(args.prompt, "Bonjour")
+
+    def test_detect_yaml_config_kind_returns_none_for_unknown_shape(self) -> None:
+        self.assertIsNone(_detect_yaml_config_kind({"name": "Config", "prompt": "Bonjour"}))
+
+    def test_pop_rejects_team_file_passed_as_agent_file(self) -> None:
+        stderr = io.StringIO()
+
+        with redirect_stderr(stderr):
+            exit_code = cli.main(["pop", "-a", r".\samples\team.yaml", "-p", "Bonjour"])
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("Invalid agent YAML", stderr.getvalue())
+        self.assertIn("defines `agents` at the root", stderr.getvalue())
+        self.assertIn("Use `-t/--team-file` instead of `-a/--agent-file`", stderr.getvalue())
+
+    def test_pop_rejects_agent_file_passed_as_team_file(self) -> None:
+        stderr = io.StringIO()
+
+        with redirect_stderr(stderr):
+            exit_code = cli.main(["pop", "-t", r".\samples\poete.yaml", "-p", "Bonjour"])
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("Invalid team YAML", stderr.getvalue())
+        self.assertIn("matches an agent configuration (`name`, `model`, `prompt`)", stderr.getvalue())
+        self.assertIn("does not define `agents` at the root", stderr.getvalue())
+        self.assertIn("Use `-a/--agent-file` instead of `-t/--team-file`", stderr.getvalue())
 
     def test_infer_team_pattern_selects_expected_agent_framework_pattern(self) -> None:
         agent = cli.AgentConfig(
