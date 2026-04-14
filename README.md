@@ -55,6 +55,12 @@ Handoff example:
 ftry pop -t .\samples\teams\han-support-routing-team\team.yaml -p "I was charged twice for my monthly plan and I need a short refund update I can send to the customer."
 ```
 
+Magentic example:
+
+```powershell
+ftry pop -t .\samples\teams\mag-launch-planning-team\team.yaml -p "We are launching a weekly digest feature for project managers next month. Build a lightweight rollout brief with the goal, main risks, and next action."
+```
+
 ## Local installation
 
 Prerequisites:

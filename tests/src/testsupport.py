@@ -14,6 +14,7 @@ SEQUENTIAL_SAMPLE_TEAM_FILE = SAMPLES_DIR / "teams" / "seq-support-brief-team" /
 CONCURRENT_SAMPLE_TEAM_FILE = SAMPLES_DIR / "teams" / "con-release-readiness-team" / "team.yaml"
 GROUP_CHAT_SAMPLE_TEAM_FILE = SAMPLES_DIR / "teams" / "grp-feature-debate-team" / "team.yaml"
 HANDOFF_SAMPLE_TEAM_FILE = SAMPLES_DIR / "teams" / "han-support-routing-team" / "team.yaml"
+MAGENTIC_SAMPLE_TEAM_FILE = SAMPLES_DIR / "teams" / "mag-launch-planning-team" / "team.yaml"
 
 
 def strip_ansi(text: str) -> str:
