@@ -17,6 +17,7 @@ from tests.src.testsupport import (
     FakeGroupChatBuilder,
     FakeHandoffBuilder,
     FakeMagenticBuilder,
+    FakeOpenAIChatCompletionClient,
     FakeSequentialBuilder,
     SAMPLE_TEAM_FILE,
     make_fake_agent_framework_modules,
@@ -47,7 +48,6 @@ class TeamTests(unittest.TestCase):
         name: str = "Team",
         description: str | None = "Helpful team.",
         instructions: str = "Discuss and solve the request.",
-        pattern: str | None = None,
         with_model: bool = False,
         max_turns: int | None = None,
     ) -> team_module.TeamConfig:
@@ -57,19 +57,13 @@ class TeamTests(unittest.TestCase):
             instructions=instructions,
             agents=agents or (self._make_agent_config(),),
             model=team_module.AgentModelConfig(name="gpt-4o", provider="openai", api_key="secret") if with_model else None,
-            pattern=pattern,
             termination=team_module.TeamTerminationConfig(max_turns=max_turns),
         )
 
     def _make_team(self, *agents: team_module.AgentConfig, **kwargs: object) -> team_module.Team:
         return team_module.Team(self._make_team_config(*agents, **kwargs))
 
-    def test_pattern_and_termination_helpers_cover_aliases_and_errors(self) -> None:
-        self.assertEqual(team_module.Team._normalize_pattern("Group_Chat"), "group-chat")
-        self.assertEqual(team_module.Team._normalize_pattern("magentic-one"), "magentic")
-        with self.assertRaisesRegex(team_module.FtryCliError, "Unsupported team pattern `swarm`"):
-            team_module.Team._normalize_pattern("swarm")
-
+    def test_termination_helper_parses_and_validates_max_turns(self) -> None:
         self.assertEqual(team_module.Team._parse_termination(None), team_module.TeamTerminationConfig())
         self.assertEqual(team_module.Team._parse_termination({}), team_module.TeamTerminationConfig())
         self.assertEqual(
@@ -98,11 +92,35 @@ class TeamTests(unittest.TestCase):
         rendered = team._render_instructions()
         self.assertIn("Prompter, Reviewer", rendered)
         self.assertIn("- Reviewer: Review drafts.", rendered)
+        inference_input = team._render_pattern_inference_input(rendered_instructions=rendered)
+        self.assertIn("Team name: Workshop", inference_input)
+        self.assertIn("Team prompt:", inference_input)
+        self.assertNotIn("Raw team prompt template:", inference_input)
+        self.assertNotIn("Build a prompt.", inference_input)
 
-        analysis_text = team._compose_pattern_analysis_text()
-        self.assertIn("workshop", analysis_text)
-        self.assertTrue(team_module.Team._contains_any(analysis_text, ("review",)))
-        self.assertTrue(team_module.Team._has_numbered_steps(team.instructions))
+    def test_from_mapping_and_config_property_expose_parsed_team_config(self) -> None:
+        raw_config = {
+            "name": "Inline Team",
+            "agents": [
+                {
+                    "name": "Inline Agent",
+                    "model": {
+                        "name": "gpt-4o",
+                        "provider": "openai",
+                        "api-key": "env:OAI_API_KEY",
+                    },
+                    "prompt": "Handle the request.",
+                }
+            ],
+            "prompt": "Coordinate the work.",
+        }
+
+        with patch.dict(os.environ, {"OAI_API_KEY": "secret-key"}, clear=False):
+            team = team_module.Team.from_mapping(raw_config)
+
+        self.assertEqual(team.config.name, "Inline Team")
+        self.assertEqual(team.config.instructions, "Coordinate the work.")
+        self.assertEqual(team.config.agents[0].name, "Inline Agent")
 
     def test_team_loader_and_inference_helpers_cover_string_file_refs_missing_defaults_and_fallbacks(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -143,14 +161,6 @@ class TeamTests(unittest.TestCase):
             with self.assertRaisesRegex(team_module.FtryCliError, "Team file not found"):
                 team_module.Team.from_file(temp_path / "missing-team.yaml")
 
-        neutral_team = self._make_team(
-            self._make_agent_config(name="Helper", description="Answers the request.", instructions="Provide a useful answer."),
-            name="Generalists",
-            description=None,
-            instructions="Help with the request.",
-        )
-        self.assertEqual(neutral_team._infer_pattern(), "group-chat")
-
         first_agent = FakeAgent(name="Alpha", instructions="Handle the task.", description="First specialist.")
         second_agent = FakeAgent(name="Beta", instructions="Continue the work.", description="Second specialist.")
         self.assertEqual(team_module.Team._select_handoff_start_agent([first_agent, second_agent]), first_agent)
@@ -182,7 +192,6 @@ class TeamTests(unittest.TestCase):
                     "\n".join(
                         [
                             "name: Explicit Team",
-                            "pattern: group_chat",
                             "agents:",
                             f"  - file: .\\{agent_file.name}",
                             "prompt: |",
@@ -193,8 +202,38 @@ class TeamTests(unittest.TestCase):
                 )
 
                 team = team_module.Team.from_file(team_file)
-                self.assertEqual(team.pattern, "group-chat")
+                self.assertEqual(team.name, "Explicit Team")
                 self.assertEqual(team.agents[0].name, "Test Agent")
+
+                explicit_pattern_file = temp_path / "pattern-team.yaml"
+                explicit_pattern_file.write_text(
+                    "\n".join(
+                        [
+                            "name: Pattern Team",
+                            "pattern: sequential",
+                            "agents:",
+                            f"  - file: .\\{agent_file.name}",
+                            "prompt: |",
+                            "  Coordinate the work.",
+                        ]
+                    ),
+                    encoding="utf-8",
+                )
+
+                explicit_orchestration_file = temp_path / "orchestration-team.yaml"
+                explicit_orchestration_file.write_text(
+                    "\n".join(
+                        [
+                            "name: Orchestration Team",
+                            "orchestration: concurrent",
+                            "agents:",
+                            f"  - file: .\\{agent_file.name}",
+                            "prompt: |",
+                            "  Coordinate the work.",
+                        ]
+                    ),
+                    encoding="utf-8",
+                )
 
                 bad_team_file = temp_path / "bad-team.yaml"
                 bad_team_file.write_text(
@@ -228,6 +267,10 @@ class TeamTests(unittest.TestCase):
                     team_module.Team.from_file(bad_team_file)
                 with self.assertRaisesRegex(team_module.FtryCliError, "Invalid or missing `agents` list"):
                     team_module.Team.from_file(empty_agents_file)
+                with self.assertRaisesRegex(team_module.FtryCliError, "Explicit team workflow selection is no longer supported"):
+                    team_module.Team.from_file(explicit_pattern_file)
+                with self.assertRaisesRegex(team_module.FtryCliError, "Explicit team workflow selection is no longer supported"):
+                    team_module.Team.from_file(explicit_orchestration_file)
 
             with patch.dict(os.environ, {"OAI_API_KEY": "secret-key"}, clear=False):
                 repo_sample = team_module.Team.from_file(SAMPLE_TEAM_FILE)
@@ -303,37 +346,96 @@ class TeamTests(unittest.TestCase):
             self.assertEqual(controller.name, "Better-Prompt-team")
             self.assertEqual(self._make_team(agent_config)._create_controller_agent(instructions="ctx"), None)
 
-    def test_infer_team_pattern_selects_expected_agent_framework_pattern(self) -> None:
-        agent = self._make_agent_config()
+    def test_infer_team_pattern_uses_structured_llm_output(self) -> None:
+        reset_fakes()
+        agent = self._make_agent_config(
+            description="Helpful specialist.",
+            instructions="AGENT PROMPT SHOULD NOT APPEAR",
+        )
+        with patch.dict(sys.modules, make_fake_agent_framework_modules(), clear=False):
+            FakeAgent.next_value = {
+                "workflow_type": "concurrent",
+                "reason": "Agents can work independently on the same input.",
+            }
+            inferred_team = self._make_team(
+                agent,
+                name="研究团队",
+                description="Analyse plusieurs aspects.",
+                instructions=(
+                    "Participants: {participants}\n"
+                    "Roles:\n"
+                    "{roles}\n"
+                    "Step 1\n"
+                    "Step 2\n"
+                    "Step 3\n"
+                    "Step 4\n"
+                    "请协作完成这个任务。"
+                ),
+            )
+            rendered = inferred_team._render_instructions()
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                self.assertEqual(asyncio.run(inferred_team._infer_pattern(rendered_instructions=rendered)), "concurrent")
+            self.assertEqual(FakeOpenAIChatCompletionClient.last_model, "gpt-4o")
+            self.assertIsInstance(FakeAgent.last_options, dict)
+            self.assertIn("response_format", FakeAgent.last_options)
+            self.assertEqual(FakeAgent.last_options["response_format"]["type"], "json_schema")
+            self.assertIn("Team prompt:", FakeAgent.last_prompt or "")
+            self.assertIn("Participants: Agent", FakeAgent.last_prompt or "")
+            self.assertIn("- Agent: Helpful specialist.", FakeAgent.last_prompt or "")
+            self.assertIn("请协作完成这个任务。", FakeAgent.last_prompt or "")
+            self.assertNotIn("AGENT PROMPT SHOULD NOT APPEAR", FakeAgent.last_prompt or "")
+            plain_stderr = strip_ansi(stderr.getvalue())
+            self.assertIn("TEAM 研究团队 | team-type-inference-prompt:", plain_stderr)
+            self.assertIn("Team prompt:", plain_stderr)
+            self.assertIn("Participants: Agent", plain_stderr)
+            self.assertIn("Roles:", plain_stderr)
+            self.assertNotIn("Step 1", plain_stderr)
+            self.assertNotIn("Step 4", plain_stderr)
+            self.assertNotIn("请协作完成这个任务。", plain_stderr)
+            self.assertIn("\n\t...", stderr.getvalue())
+            self.assertNotIn("AGENT PROMPT SHOULD NOT APPEAR", plain_stderr)
+            self.assertIn("TEAM 研究团队 | team-type-inference-output:", plain_stderr)
+            self.assertIn('"workflow_type": "concurrent"', plain_stderr)
+            self.assertIn('"reason": "Agents can work independently on the same input."', plain_stderr)
+
+    def test_inference_helpers_cover_validation_and_provider_errors(self) -> None:
+        class UnserializableValue:
+            def __str__(self) -> str:
+                return "custom-unserializable-value"
 
         self.assertEqual(
-            self._make_team(agent, name="Triage", instructions="Route the request and handoff to specialists.")._infer_pattern(),
-            "handoff",
+            team_module.Team._format_pattern_inference_output(UnserializableValue()),
+            "custom-unserializable-value",
         )
-        self.assertEqual(
-            self._make_team(agent, name="Research swarm", instructions="Work in parallel on independent aspects.")._infer_pattern(),
-            "concurrent",
+
+        with self.assertRaisesRegex(team_module.FtryCliError, "JSON object"):
+            team_module.Team._parse_pattern_inference("invalid")
+
+        with self.assertRaisesRegex(team_module.FtryCliError, "valid `reason`"):
+            team_module.Team._parse_pattern_inference({"workflow_type": "sequential", "reason": "   "})
+
+        unsupported_team = self._make_team(
+            self._make_agent_config(provider="anthropic"),
+            name="Unsupported Team",
+            instructions="Coordinate the work.",
         )
-        self.assertEqual(
-            self._make_team(
-                agent,
-                name="Planner",
-                instructions="Create a plan, replan if needed, and manage a complex task.",
-            )._infer_pattern(),
-            "magentic",
-        )
-        self.assertEqual(
-            self._make_team(agent, name="Workshop", instructions="Discuss ideas, review them, and iterate together.")._infer_pattern(),
-            "group-chat",
-        )
-        self.assertEqual(
-            self._make_team(
-                agent,
-                name="Pipeline",
-                instructions="First collect data, then write the answer, and finally polish it.",
-            )._infer_pattern(),
-            "sequential",
-        )
+        with self.assertRaisesRegex(team_module.FtryCliError, "Unsupported provider `anthropic`"):
+            asyncio.run(unsupported_team._infer_pattern(rendered_instructions=unsupported_team._render_instructions()))
+
+    def test_infer_team_pattern_rejects_invalid_structured_output(self) -> None:
+        reset_fakes()
+        agent = self._make_agent_config()
+        team = self._make_team(agent, name="Team", instructions="A prompt.")
+
+        with patch.dict(sys.modules, make_fake_agent_framework_modules(), clear=False):
+            FakeAgent.next_value = {"reason": "Missing workflow type."}
+            with self.assertRaisesRegex(team_module.FtryCliError, "valid `workflow_type`"):
+                asyncio.run(team._infer_pattern(rendered_instructions=team._render_instructions()))
+
+            FakeAgent.next_value = {"workflow_type": "swarm", "reason": "Unsupported."}
+            with self.assertRaisesRegex(team_module.FtryCliError, "unsupported `workflow_type` `swarm`"):
+                asyncio.run(team._infer_pattern(rendered_instructions=team._render_instructions()))
 
     def test_build_team_participants_and_workflows_cover_pattern_specific_logic(self) -> None:
         reset_fakes()
@@ -367,57 +469,67 @@ class TeamTests(unittest.TestCase):
                 2,
             )
 
-            self._make_team(
-                duplicate_a,
-                specialist,
-                pattern="sequential",
-                name="Pipeline",
-                instructions="First draft, then refine.",
-            )._build_workflow()
+            FakeAgent.next_value = {"workflow_type": "sequential", "reason": "Pipeline."}
+            asyncio.run(
+                self._make_team(
+                    duplicate_a,
+                    specialist,
+                    name="Pipeline",
+                    instructions="First draft, then refine.",
+                )._build_workflow()
+            )
             self.assertTrue(FakeSequentialBuilder.last_kwargs["intermediate_outputs"])
 
-            self._make_team(
-                duplicate_a,
-                specialist,
-                pattern="concurrent",
-                name="Swarm",
-                instructions="Work in parallel.",
-            )._build_workflow()
+            FakeAgent.next_value = {"workflow_type": "concurrent", "reason": "Independent."}
+            asyncio.run(
+                self._make_team(
+                    duplicate_a,
+                    specialist,
+                    name="Swarm",
+                    instructions="Work in parallel.",
+                )._build_workflow()
+            )
             self.assertTrue(FakeConcurrentBuilder.last_kwargs["intermediate_outputs"])
 
-            self._make_team(
-                router,
-                specialist,
-                pattern="handoff",
-                name="Triage",
-                instructions="Route and handoff.",
-                max_turns=3,
-            )._build_workflow()
+            FakeAgent.next_value = {"workflow_type": "handoff", "reason": "Routing."}
+            asyncio.run(
+                self._make_team(
+                    router,
+                    specialist,
+                    name="Triage",
+                    instructions="Route and handoff.",
+                    max_turns=3,
+                )._build_workflow()
+            )
             self.assertEqual(FakeHandoffBuilder.last_start_agent.name, "Router")
             self.assertEqual(FakeHandoffBuilder.last_autonomous_kwargs["turn_limits"]["Router"], 3)
             self.assertTrue(callable(FakeHandoffBuilder.last_termination_condition))
 
-            self._make_team(
-                duplicate_a,
-                specialist,
-                pattern="group-chat",
-                name="Workshop",
-                instructions="Discuss together.",
-                with_model=True,
-                max_turns=5,
-            )._build_workflow()
+            FakeAgent.next_value = {"workflow_type": "group-chat", "reason": "Collaboration."}
+            asyncio.run(
+                self._make_team(
+                    duplicate_a,
+                    specialist,
+                    name="Workshop",
+                    instructions="Discuss together.",
+                    with_model=True,
+                    max_turns=5,
+                )._build_workflow()
+            )
             self.assertEqual(FakeGroupChatBuilder.last_kwargs["max_rounds"], 5)
             self.assertIsInstance(FakeGroupChatBuilder.last_kwargs["orchestrator_agent"], FakeAgent)
 
-            self._make_team(
-                duplicate_a,
-                specialist,
-                pattern="magentic",
-                name="Planner",
-                instructions="Plan and replan a complex task.",
-                with_model=True,
-                max_turns=4,
-            )._build_workflow()
+            FakeAgent.next_value = {"workflow_type": "magentic", "reason": "Planning."}
+            asyncio.run(
+                self._make_team(
+                    duplicate_a,
+                    specialist,
+                    name="Planner",
+                    instructions="Plan and replan a complex task.",
+                    with_model=True,
+                    max_turns=4,
+                )._build_workflow()
+            )
             self.assertEqual(FakeMagenticBuilder.last_kwargs["max_round_count"], 4)
             self.assertIsInstance(FakeMagenticBuilder.last_kwargs["manager_agent"], FakeAgent)
 
@@ -429,7 +541,6 @@ class TeamTests(unittest.TestCase):
             self._make_agent_config(name="Specialist", description="Handles the final answer.", instructions="Solve the task."),
             name="Handoff squad",
             instructions="Route the request and handoff to specialists.",
-            pattern="handoff",
             max_turns=2,
         )
 
@@ -438,6 +549,7 @@ class TeamTests(unittest.TestCase):
             patch.dict(sys.modules, make_fake_agent_framework_modules(), clear=False),
             redirect_stderr(stderr),
         ):
+            FakeAgent.next_value = {"workflow_type": "handoff", "reason": "Routing."}
             output = asyncio.run(team.run("Route this request"))
 
         self.assertEqual(output, "[Specialist]\nhandoff:Route this request")
@@ -454,7 +566,6 @@ class TeamTests(unittest.TestCase):
             self._make_agent_config(name="Reviewer", instructions="Review the draft."),
             name="Better Prompt team",
             instructions="Discuss together and choose the best prompt.",
-            pattern="group-chat",
             with_model=True,
         )
 
@@ -463,6 +574,7 @@ class TeamTests(unittest.TestCase):
             patch.dict(sys.modules, make_fake_agent_framework_modules(), clear=False),
             redirect_stderr(stderr),
         ):
+            FakeAgent.next_value = {"workflow_type": "group-chat", "reason": "Collaboration."}
             output = asyncio.run(team.run("Ameliore ce prompt"))
 
         self.assertEqual(output, "[Better Prompt team]\ngroup-chat:Ameliore ce prompt")
@@ -480,7 +592,6 @@ class TeamTests(unittest.TestCase):
             self._make_agent_config(name="Writer", instructions="Write the final answer."),
             name="Pipeline team",
             instructions="First gather the facts, then draft the answer, and finally produce the final response.",
-            pattern="sequential",
         )
 
         with (
@@ -488,6 +599,7 @@ class TeamTests(unittest.TestCase):
             patch.dict(sys.modules, make_fake_agent_framework_modules(), clear=False),
             redirect_stderr(stderr),
         ):
+            FakeAgent.next_value = {"workflow_type": "sequential", "reason": "Pipeline."}
             output = asyncio.run(team.run(long_prompt))
 
         self.assertEqual(output, f"[Writer]\nsequential:{long_prompt}")

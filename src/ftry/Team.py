@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
+from importlib.resources import files
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -32,32 +34,30 @@ from .Tools import (
     _trace_team_start,
 )
 
-
-TEAM_PATTERN_ALIASES = {
-    "concurrent": "concurrent",
-    "group-chat": "group-chat",
-    "group_chat": "group-chat",
-    "groupchat": "group-chat",
-    "handoff": "handoff",
-    "magentic": "magentic",
-    "magentic-one": "magentic",
-    "sequential": "sequential",
+TEAM_PATTERN_VALUES = ("sequential", "concurrent", "handoff", "group-chat", "magentic")
+TEAM_TYPE_INFERENCE_PROMPT_FILE = "team-type-inference.txt"
+TEAM_TYPE_INFERENCE_RESPONSE_FORMAT = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "team_workflow_inference",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "workflow_type": {
+                    "type": "string",
+                    "enum": list(TEAM_PATTERN_VALUES),
+                },
+                "reason": {
+                    "type": "string",
+                    "minLength": 1,
+                },
+            },
+            "required": ["workflow_type", "reason"],
+            "additionalProperties": False,
+        },
+    },
 }
-HANDOFF_HINTS = ("handoff", "route", "routing", "triage", "delegate", "delegation", "transfer")
-MAGENTIC_HINTS = ("magentic", "manager", "plan", "planner", "replan", "open-ended", "complex task")
-CONCURRENT_HINTS = ("parallel", "concurrent", "independent", "simultaneous", "simultaneously")
-GROUP_CHAT_HINTS = (
-    "collabor",
-    "conversation",
-    "discussion",
-    "iterat",
-    "feedback",
-    "review",
-    "rework",
-    "select the most appropriate",
-    "shared",
-)
-SEQUENTIAL_HINTS = ("sequential", "sequence", "pipeline", "stage", "step", "first", "then", "finally", "ensuite")
 HANDOFF_START_HINTS = ("triage", "router", "routing", "route", "dispatcher", "coordinator")
 TEAM_CONTEXT_PATTERNS = frozenset({"sequential", "concurrent", "handoff"})
 TEAM_SHARED_RESULT_PATTERNS = frozenset({"group-chat", "concurrent", "magentic"})
@@ -71,13 +71,18 @@ class TeamTerminationConfig:
 
 
 @dataclass(frozen=True)
+class _TeamPatternInference:
+    pattern: str
+    reason: str
+
+
+@dataclass(frozen=True)
 class TeamConfig:
     name: str
     instructions: str
     agents: tuple[AgentConfig, ...]
     model: AgentModelConfig | None = None
     description: str | None = None
-    pattern: str | None = None
     termination: TeamTerminationConfig = field(default_factory=TeamTerminationConfig)
 
 
@@ -214,15 +219,11 @@ class Team:
         return self._config.model
 
     @property
-    def pattern(self) -> str | None:
-        return self._config.pattern
-
-    @property
     def termination(self) -> TeamTerminationConfig:
         return self._config.termination
 
     async def run(self, prompt: str) -> str:
-        pattern, workflow, author_name_map = self._build_workflow()
+        pattern, workflow, author_name_map = await self._build_workflow()
         state = _TeamTraceState(
             pattern=pattern,
             team_name=self.name,
@@ -261,14 +262,18 @@ class Team:
         if not agents:
             raise FtryCliError("Invalid or missing `agents` list in team YAML.")
 
-        raw_pattern = config.get("pattern", config.get("orchestration"))
+        if "pattern" in config or "orchestration" in config:
+            raise FtryCliError(
+                "Explicit team workflow selection is no longer supported. Remove `pattern`/`orchestration`; "
+                "the workflow type is inferred automatically."
+            )
+
         return TeamConfig(
             name=_require_non_empty_string(config.get("name"), "name", "team"),
             description=_require_optional_string(config.get("description"), "description", "team"),
             instructions=_require_non_empty_string(config.get("prompt"), "prompt", "team"),
             agents=agents,
             model=AgentModelConfig.from_mapping(config.get("model"), config_kind="team", required=False),
-            pattern=cls._normalize_pattern(raw_pattern) if raw_pattern is not None else None,
             termination=cls._parse_termination(config.get("termination")),
         )
 
@@ -301,16 +306,6 @@ class Team:
         return TeamTerminationConfig(max_turns=_require_positive_int(max_turns, "termination.max-turns", "team"))
 
     @staticmethod
-    def _normalize_pattern(value: str) -> str:
-        normalized = value.strip().lower().replace("_", "-").replace(" ", "-")
-        pattern = TEAM_PATTERN_ALIASES.get(normalized)
-        if pattern is None:
-            raise FtryCliError(
-                f"Unsupported team pattern `{value}`. Expected one of: sequential, concurrent, handoff, group-chat, magentic."
-            )
-        return pattern
-
-    @staticmethod
     def _render_role_summary(agent: AgentConfig) -> str:
         source = agent.description or agent.instructions
         return " ".join(source.split())
@@ -320,37 +315,107 @@ class Team:
         roles = "\n".join(f"- {agent.name}: {self._render_role_summary(agent)}" for agent in self.agents)
         return self.instructions.replace("{participants}", participants).replace("{roles}", roles)
 
-    def _compose_pattern_analysis_text(self) -> str:
-        fragments = [self.name, self.description or "", self.instructions]
-        for agent in self.agents:
-            fragments.extend((agent.name, agent.description or "", agent.instructions))
-        return " ".join(fragment for fragment in fragments if fragment).lower()
+    def _render_pattern_inference_input(self, *, rendered_instructions: str) -> str:
+        return "\n".join(
+            [
+                f"Team name: {self.name}",
+                f"Team description: {self.description or '(none)'}",
+                "",
+                "Team prompt:",
+                rendered_instructions,
+            ]
+        )
+
+    @staticmethod
+    def _load_team_type_inference_prompt_template() -> str:
+        return files("ftry").joinpath(TEAM_TYPE_INFERENCE_PROMPT_FILE).read_text(encoding="utf-8")
 
     @staticmethod
     def _contains_any(text: str, hints: Sequence[str]) -> bool:
         return any(hint in text for hint in hints)
 
+    def _resolve_pattern_inference_model(self) -> AgentModelConfig:
+        return self.model or self.agents[0].model
+
     @staticmethod
-    def _has_numbered_steps(text: str) -> bool:
-        lowered = text.lower()
-        return "1." in lowered and "2." in lowered
+    def _format_pattern_inference_output(value: Any) -> str:
+        try:
+            return json.dumps(value, ensure_ascii=False, indent=2)
+        except TypeError:
+            return str(value)
 
-    def _infer_pattern(self) -> str:
-        if self.pattern is not None:
-            return self.pattern
+    @staticmethod
+    def _preview_pattern_inference_prompt(prompt: str, *, max_lines: int = 6) -> str:
+        lines = prompt.splitlines()
+        if len(lines) <= max_lines:
+            return prompt
+        return "\n".join([*lines[:max_lines], "..."])
 
-        analysis_text = self._compose_pattern_analysis_text()
-        if self._contains_any(analysis_text, HANDOFF_HINTS):
-            return "handoff"
-        if self._contains_any(analysis_text, MAGENTIC_HINTS):
-            return "magentic"
-        if self._contains_any(analysis_text, CONCURRENT_HINTS) and not self._contains_any(analysis_text, SEQUENTIAL_HINTS):
-            return "concurrent"
-        if self._contains_any(analysis_text, GROUP_CHAT_HINTS):
-            return "group-chat"
-        if self._contains_any(analysis_text, SEQUENTIAL_HINTS) or self._has_numbered_steps(self.instructions):
-            return "sequential"
-        return "group-chat"
+    @classmethod
+    def _parse_pattern_inference(cls, value: Any) -> _TeamPatternInference:
+        if not isinstance(value, Mapping):
+            raise FtryCliError("Team workflow inference did not return a JSON object.")
+
+        workflow_type = value.get("workflow_type")
+        if not isinstance(workflow_type, str) or not workflow_type.strip():
+            raise FtryCliError("Team workflow inference did not return a valid `workflow_type`.")
+        normalized_workflow_type = workflow_type.strip()
+        if normalized_workflow_type not in TEAM_PATTERN_VALUES:
+            raise FtryCliError(
+                "Team workflow inference returned an unsupported `workflow_type` "
+                f"`{workflow_type}`. Expected one of: {', '.join(TEAM_PATTERN_VALUES)}."
+            )
+
+        reason = value.get("reason")
+        if not isinstance(reason, str) or not reason.strip():
+            raise FtryCliError("Team workflow inference did not return a valid `reason`.")
+
+        return _TeamPatternInference(
+            pattern=normalized_workflow_type,
+            reason=reason.strip(),
+        )
+
+    async def _infer_pattern(self, *, rendered_instructions: str) -> str:
+        model = self._resolve_pattern_inference_model()
+        if model.provider.lower() != "openai":
+            raise FtryCliError(
+                f"Unsupported provider `{model.provider}`. Only `openai` is supported for now."
+            )
+
+        try:
+            from agent_framework.openai import OpenAIChatCompletionClient
+        except ImportError as exc:  # pragma: no cover - covered by CLI error path
+            raise FtryCliError(
+                "Microsoft Agent Framework OpenAI support is required for `ftry pop -t`. "
+                "Reinstall the project with `python -m pip install -e .`."
+            ) from exc
+
+        inference_agent = OpenAIChatCompletionClient(
+            model=model.name,
+            api_key=model.api_key,
+        ).as_agent(
+            name="team-workflow-selector",
+            description="Selects the most appropriate Microsoft Agent Framework workflow type.",
+            instructions=self._load_team_type_inference_prompt_template(),
+        )
+        inference_prompt = self._render_pattern_inference_input(rendered_instructions=rendered_instructions)
+        _trace(
+            "%s | team-type-inference-prompt:%s",
+            _trace_team_label(self.name),
+            _trace_block(self._preview_pattern_inference_prompt(inference_prompt)),
+        )
+        inference_response = await inference_agent.run(
+            inference_prompt,
+            options={"response_format": TEAM_TYPE_INFERENCE_RESPONSE_FORMAT},
+        )
+        raw_inference_output = getattr(inference_response, "value", None)
+        _trace(
+            "%s | team-type-inference-output:%s",
+            _trace_team_label(self.name),
+            _trace_block(self._format_pattern_inference_output(raw_inference_output)),
+        )
+        inference = self._parse_pattern_inference(raw_inference_output)
+        return inference.pattern
 
     @staticmethod
     def _load_orchestration_builders() -> tuple[Any, Any, Any, Any, Any]:
@@ -435,9 +500,9 @@ class Team:
             )
         return handoff_builder.with_autonomous_mode(**autonomous_kwargs).build()
 
-    def _build_workflow(self) -> tuple[str, Any, Mapping[str, str]]:
-        pattern = self._infer_pattern()
+    async def _build_workflow(self) -> tuple[str, Any, Mapping[str, str]]:
         rendered_instructions = self._render_instructions()
+        pattern = await self._infer_pattern(rendered_instructions=rendered_instructions)
         inject_team_context = pattern in TEAM_CONTEXT_PATTERNS or self.model is None
         participants, author_name_map = self._build_participants(
             extra_instructions=rendered_instructions if inject_team_context else None,

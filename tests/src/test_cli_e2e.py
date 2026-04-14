@@ -25,8 +25,9 @@ def _write_stub_agent_framework(root: Path) -> None:
         textwrap.dedent(
             """
             class Result:
-                def __init__(self, text):
+                def __init__(self, text, value=None):
                     self.text = text
+                    self.value = value
 
 
             class Agent:
@@ -35,7 +36,15 @@ def _write_stub_agent_framework(root: Path) -> None:
                     self.instructions = instructions
                     self.description = description
 
-                async def run(self, prompt):
+                async def run(self, prompt, *, options=None, **kwargs):
+                    if isinstance(options, dict) and "response_format" in options:
+                        return Result(
+                            f"{self.name}:{prompt}",
+                            value={
+                                "workflow_type": "magentic",
+                                "reason": "Stubbed workflow inference result.",
+                            },
+                        )
                     return Result(f"{self.name}:{prompt}")
 
 
@@ -332,6 +341,14 @@ class CliEndToEndTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         self.assertEqual(result.stdout.strip(), "")
         plain_stderr = _strip_ansi(result.stderr)
+        self.assertIn("TEAM Better Prompt team | team-type-inference-prompt:", plain_stderr)
+        self.assertIn("Team prompt:", plain_stderr)
+        self.assertIn("You are managing a team of agents to build the best possible prompt.", plain_stderr)
+        self.assertIn("...", plain_stderr)
+        self.assertNotIn("Prompter, Reviewer, Runner", plain_stderr)
+        self.assertNotIn("agent-prompter.yaml", plain_stderr)
+        self.assertIn("TEAM Better Prompt team | team-type-inference-output:", plain_stderr)
+        self.assertIn('"workflow_type": "magentic"', plain_stderr)
         self.assertIn("TEAM Better Prompt team | pattern: magentic | input:", plain_stderr)
         self.assertIn("TEAM Better Prompt team --> Prompter | input:", plain_stderr)
         self.assertIn("TEAM Better Prompt team <-- Runner | final-output:", plain_stderr)

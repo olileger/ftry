@@ -27,7 +27,7 @@ ftry = "ftry.cli:main"
 package-dir = {"" = "src"}
 
 [tool.setuptools.package-data]
-ftry = ["line.txt", "pop.txt"]
+ftry = ["line.txt", "pop.txt", "team-type-inference.txt"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

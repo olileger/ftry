@@ -15,7 +15,7 @@ agents:
 
 prompt: |
   # Context
-  You are coordinating a team of agents to build the best possible prompt.
+  You are managing a team of agents to build the best possible prompt.
   You have 3 agents at your disposal:
       {participants}
   

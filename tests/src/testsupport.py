@@ -17,20 +17,30 @@ def strip_ansi(text: str) -> str:
 
 
 class FakeResult:
-    def __init__(self, text: str) -> None:
+    def __init__(self, text: str, *, value: object | None = None) -> None:
         self.text = text
+        self.value = value
 
 
 class FakeAgent:
     last_prompt: str | None = None
+    last_options: object | None = None
+    next_value: object | None = None
 
     def __init__(self, name: str, instructions: str, description: str | None = None) -> None:
         self.name = name
         self.instructions = instructions
         self.description = description
 
-    async def run(self, prompt: str) -> FakeResult:
+    async def run(self, prompt: str, *, options: object | None = None, **_: object) -> FakeResult:
         FakeAgent.last_prompt = prompt
+        FakeAgent.last_options = options
+        if isinstance(options, dict) and "response_format" in options:
+            return FakeResult(
+                "Structured workflow inference",
+                value=FakeAgent.next_value
+                or {"workflow_type": "magentic", "reason": "Stubbed workflow inference result."},
+            )
         return FakeResult("Poeme genere")
 
 
@@ -295,6 +305,8 @@ def make_fake_agent_framework_modules() -> dict[str, types.ModuleType]:
 
 def reset_fakes() -> None:
     FakeAgent.last_prompt = None
+    FakeAgent.last_options = None
+    FakeAgent.next_value = None
     FakeOpenAIChatCompletionClient.last_model = None
     FakeOpenAIChatCompletionClient.last_api_key = None
     FakeOpenAIChatCompletionClient.last_agent = None
