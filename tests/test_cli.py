@@ -1006,16 +1006,16 @@ class CliTests(unittest.TestCase):
         self.assertIn("Error: Agent file not found:", stderr.getvalue())
 
     def test_build_parser_parses_pop_arguments(self) -> None:
-        args = cli.build_parser().parse_args(["pop", "-a", r"samples\poete.yaml", "-p", "Bonjour"])
+        args = cli.build_parser().parse_args(["pop", "-a", r"samples\agents\poete.yaml", "-p", "Bonjour"])
         self.assertEqual(args.command, "pop")
-        self.assertEqual(args.agent_file, r"samples\poete.yaml")
+        self.assertEqual(args.agent_file, r"samples\agents\poete.yaml")
         self.assertIsNone(args.team_file)
         self.assertEqual(args.prompt, "Bonjour")
 
     def test_build_parser_parses_pop_team_arguments(self) -> None:
-        args = cli.build_parser().parse_args(["pop", "-t", r"samples\team.yaml", "-p", "Bonjour"])
+        args = cli.build_parser().parse_args(["pop", "-t", r"samples\teams\better-prompt\team.yaml", "-p", "Bonjour"])
         self.assertEqual(args.command, "pop")
-        self.assertEqual(args.team_file, r"samples\team.yaml")
+        self.assertEqual(args.team_file, r"samples\teams\better-prompt\team.yaml")
         self.assertIsNone(args.agent_file)
         self.assertEqual(args.prompt, "Bonjour")
 
@@ -1314,7 +1314,7 @@ class CliTests(unittest.TestCase):
                     redirect_stdout(stdout),
                     redirect_stderr(stderr),
                 ):
-                    exit_code = cli.main(["pop", "-t", r".\samples\team.yaml", "-p", "Ameliore ce prompt"])
+                    exit_code = cli.main(["pop", "-t", r".\samples\teams\better-prompt\team.yaml", "-p", "Ameliore ce prompt"])
             finally:
                 os.chdir(previous_cwd)
 
