@@ -11,6 +11,7 @@ SAMPLES_DIR = REPO_ROOT / "samples"
 SAMPLE_AGENT_FILE = SAMPLES_DIR / "agents" / "poete.yaml"
 SAMPLE_TEAM_FILE = SAMPLES_DIR / "teams" / "better-prompt" / "team.yaml"
 SEQUENTIAL_SAMPLE_TEAM_FILE = SAMPLES_DIR / "teams" / "seq-support-brief-team" / "team.yaml"
+CONCURRENT_SAMPLE_TEAM_FILE = SAMPLES_DIR / "teams" / "con-release-readiness-team" / "team.yaml"
 
 
 def strip_ansi(text: str) -> str:

@@ -1,0 +1,35 @@
+name: Release Readiness team
+
+description: |
+  A small launch team where specialists can analyze the same product brief independently and in parallel.
+
+agents:
+  - file: ./agent-value-analyst.yaml
+  - file: ./agent-risk-reviewer.yaml
+  - file: ./agent-launch-note-drafter.yaml
+
+prompt: |
+  You are defining a simple concurrent workflow for a small product launch team.
+  All agents receive the exact same user request and work independently in parallel.
+  No agent depends on another agent's output.
+
+  Available agents:
+      {participants}
+
+  Parallel responsibilities:
+  1. Value Analyst explains the likely audience and user value.
+  2. Risk Reviewer lists the main launch risks or open questions.
+  3. Launch Note Drafter writes a short internal launch note.
+
+  Rules:
+  - This must be a concurrent workflow.
+  - Start all agents from the same user request.
+  - Do not run the agents in sequence.
+  - Do not hand off from one agent to another.
+  - Do not start a group discussion.
+  - Do not use tools, MCP servers, or external systems.
+  - Do not require user intervention or clarification.
+  - Each agent returns only its own contribution.
+  - Preserve the independent contributions from all agents.
+  - Here is the list of agents with their expertise:
+      {roles}

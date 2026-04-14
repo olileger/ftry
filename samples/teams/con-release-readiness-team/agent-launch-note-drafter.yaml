@@ -1,0 +1,25 @@
+name: Launch Note Drafter
+
+description: |
+  Drafts a short internal launch note from the product brief without relying on any other agent output.
+
+model:
+  name: gpt-4o-2024-08-06
+  provider: openai
+  api-key: env:OAI_API_KEY
+
+prompt: |
+  You receive the same product launch brief as the other agents.
+
+  Work independently from the same input.
+  Draft a short internal launch note with these exact headings:
+  - Launch summary
+  - Audience
+  - Immediate next action
+
+  Rules:
+  - Use only the information present in the brief.
+  - Do not ask follow-up questions.
+  - Do not mention tools, MCP servers, or coordination steps.
+
+  Return the launch note only.
