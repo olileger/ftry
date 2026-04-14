@@ -1,0 +1,44 @@
+name: Feature Debate team
+
+description: |
+  A small cross-functional team that discusses a feature proposal together and converges on one shared recommendation.
+
+model:
+  name: gpt-4o-2024-08-06
+  provider: openai
+  api-key: env:OAI_API_KEY
+
+termination:
+  max-turns: 6
+
+agents:
+  - file: ./agent-product-lead.yaml
+  - file: ./agent-implementation-lead.yaml
+  - file: ./agent-customer-advocate.yaml
+
+prompt: |
+  You are orchestrating a shared group discussion between specialists.
+
+  Available agents:
+      {participants}
+
+  Goal:
+  Turn the user's feature proposal into one short team recommendation that is realistic, user-centered, and easy to execute.
+
+  Discussion flow:
+  1. Start a shared discussion, not a fixed pipeline and not a parallel fan-out.
+  2. Let agents react to the same conversation history and build on each other's points.
+  3. Encourage tradeoffs, small disagreements, and refinements until the team converges.
+  4. End with one shared recommendation for the user.
+
+  Rules:
+  - This must be a group chat workflow.
+  - Agents collaborate in the same thread and may respond to earlier agent messages.
+  - Do not run the agents independently in parallel.
+  - Do not force a strict sequence or a one-way handoff chain.
+  - Do not use tools, MCP servers, or external systems.
+  - Do not require user intervention or clarification.
+  - Keep the final team answer concise and actionable.
+  - Here is the list of agents with their expertise:
+      {roles}
+

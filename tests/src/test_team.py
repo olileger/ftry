@@ -20,6 +20,7 @@ from tests.src.testsupport import (
     FakeMagenticBuilder,
     FakeOpenAIChatCompletionClient,
     FakeSequentialBuilder,
+    GROUP_CHAT_SAMPLE_TEAM_FILE,
     SAMPLE_TEAM_FILE,
     SEQUENTIAL_SAMPLE_TEAM_FILE,
     make_fake_agent_framework_modules,
@@ -278,6 +279,7 @@ class TeamTests(unittest.TestCase):
                 repo_sample = team_module.Team.from_file(SAMPLE_TEAM_FILE)
                 sequential_repo_sample = team_module.Team.from_file(SEQUENTIAL_SAMPLE_TEAM_FILE)
                 concurrent_repo_sample = team_module.Team.from_file(CONCURRENT_SAMPLE_TEAM_FILE)
+                group_chat_repo_sample = team_module.Team.from_file(GROUP_CHAT_SAMPLE_TEAM_FILE)
             self.assertEqual(repo_sample.name, "Better Prompt team")
             self.assertEqual(len(repo_sample.agents), 3)
             self.assertEqual(sequential_repo_sample.name, "Support Brief team")
@@ -289,6 +291,11 @@ class TeamTests(unittest.TestCase):
             self.assertEqual(
                 [agent.name for agent in concurrent_repo_sample.agents],
                 ["Value Analyst", "Risk Reviewer", "Launch Note Drafter"],
+            )
+            self.assertEqual(group_chat_repo_sample.name, "Feature Debate team")
+            self.assertEqual(
+                [agent.name for agent in group_chat_repo_sample.agents],
+                ["Product Lead", "Implementation Lead", "Customer Advocate"],
             )
 
     def test_team_from_file_resolves_project_relative_file_references(self) -> None:

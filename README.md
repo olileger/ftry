@@ -1,6 +1,6 @@
 # ftry
 
-![Coverage](https://img.shields.io/badge/coverage-99%25-brightgreen)
+![Coverage](https://img.shields.io/badge/coverage-100%25-brightgreen)
 
 Minimal CLI named `ftry`.
 
@@ -41,6 +41,12 @@ Team example:
 
 ```powershell
 ftry pop -t .\samples\teams\better-prompt\team.yaml -p "Build a better prompt to summarize this text"
+```
+
+Group chat example:
+
+```powershell
+ftry pop -t .\samples\teams\grp-feature-debate-team\team.yaml -p "We want a reminder feature that nudges users before a payment is due."
 ```
 
 ## Local installation
