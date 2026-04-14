@@ -21,6 +21,7 @@ from tests.src.testsupport import (
     FakeOpenAIChatCompletionClient,
     FakeSequentialBuilder,
     GROUP_CHAT_SAMPLE_TEAM_FILE,
+    HANDOFF_SAMPLE_TEAM_FILE,
     SAMPLE_TEAM_FILE,
     SEQUENTIAL_SAMPLE_TEAM_FILE,
     make_fake_agent_framework_modules,
@@ -280,6 +281,7 @@ class TeamTests(unittest.TestCase):
                 sequential_repo_sample = team_module.Team.from_file(SEQUENTIAL_SAMPLE_TEAM_FILE)
                 concurrent_repo_sample = team_module.Team.from_file(CONCURRENT_SAMPLE_TEAM_FILE)
                 group_chat_repo_sample = team_module.Team.from_file(GROUP_CHAT_SAMPLE_TEAM_FILE)
+                handoff_repo_sample = team_module.Team.from_file(HANDOFF_SAMPLE_TEAM_FILE)
             self.assertEqual(repo_sample.name, "Better Prompt team")
             self.assertEqual(len(repo_sample.agents), 3)
             self.assertEqual(sequential_repo_sample.name, "Support Brief team")
@@ -296,6 +298,11 @@ class TeamTests(unittest.TestCase):
             self.assertEqual(
                 [agent.name for agent in group_chat_repo_sample.agents],
                 ["Product Lead", "Implementation Lead", "Customer Advocate"],
+            )
+            self.assertEqual(handoff_repo_sample.name, "Support Routing team")
+            self.assertEqual(
+                [agent.name for agent in handoff_repo_sample.agents],
+                ["Triage Router", "Billing Specialist", "Access Specialist", "Response Finisher"],
             )
 
     def test_team_from_file_resolves_project_relative_file_references(self) -> None:
@@ -525,6 +532,12 @@ class TeamTests(unittest.TestCase):
             self.assertEqual(FakeHandoffBuilder.last_start_agent.name, "Router")
             self.assertEqual(FakeHandoffBuilder.last_autonomous_kwargs["turn_limits"]["Router"], 3)
             self.assertTrue(callable(FakeHandoffBuilder.last_termination_condition))
+            self.assertTrue(
+                all(
+                    participant.require_per_service_call_history_persistence
+                    for participant in FakeHandoffBuilder.last_autonomous_kwargs["agents"]
+                )
+            )
 
             FakeAgent.next_value = {"workflow_type": "group-chat", "reason": "Collaboration."}
             asyncio.run(

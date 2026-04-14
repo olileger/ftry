@@ -465,7 +465,12 @@ class Team:
     def _count_assistant_messages(conversation: list[Any]) -> int:
         return sum(1 for message in conversation if getattr(message, "role", None) == "assistant")
 
-    def _build_participants(self, *, extra_instructions: str | None) -> tuple[list[Any], dict[str, str]]:
+    def _build_participants(
+        self,
+        *,
+        extra_instructions: str | None,
+        require_per_service_call_history_persistence: bool = False,
+    ) -> tuple[list[Any], dict[str, str]]:
         participants: list[Any] = []
         author_name_map: dict[str, str] = {}
         used_names: set[str] = set()
@@ -483,6 +488,7 @@ class Team:
                 Agent(agent).create_participant(
                     extra_instructions=extra_instructions,
                     name_override=unique_name,
+                    require_per_service_call_history_persistence=require_per_service_call_history_persistence,
                 )
             )
 
@@ -506,6 +512,7 @@ class Team:
         inject_team_context = pattern in TEAM_CONTEXT_PATTERNS or self.model is None
         participants, author_name_map = self._build_participants(
             extra_instructions=rendered_instructions if inject_team_context else None,
+            require_per_service_call_history_persistence=pattern == "handoff",
         )
         SequentialBuilder, ConcurrentBuilder, HandoffBuilder, GroupChatBuilder, MagenticBuilder = (
             self._load_orchestration_builders()

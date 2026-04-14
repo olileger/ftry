@@ -113,11 +113,13 @@ class Agent:
         *,
         extra_instructions: str | None = None,
         name_override: str | None = None,
+        require_per_service_call_history_persistence: bool = False,
     ) -> Any:
         self._require_supported_provider()
         return self._create_openai_participant(
             extra_instructions=extra_instructions,
             name_override=name_override,
+            require_per_service_call_history_persistence=require_per_service_call_history_persistence,
         )
 
     async def run(self, prompt: str) -> str:
@@ -145,6 +147,7 @@ class Agent:
         *,
         extra_instructions: str | None = None,
         name_override: str | None = None,
+        require_per_service_call_history_persistence: bool = False,
     ) -> Any:
         try:
             from agent_framework.openai import OpenAIChatCompletionClient
@@ -161,4 +164,5 @@ class Agent:
             name=name_override or _sanitize_agent_name(self.name),
             description=self.description,
             instructions=self._build_instructions(extra_instructions),
+            require_per_service_call_history_persistence=require_per_service_call_history_persistence,
         )

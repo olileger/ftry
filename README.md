@@ -49,6 +49,12 @@ Group chat example:
 ftry pop -t .\samples\teams\grp-feature-debate-team\team.yaml -p "We want a reminder feature that nudges users before a payment is due."
 ```
 
+Handoff example:
+
+```powershell
+ftry pop -t .\samples\teams\han-support-routing-team\team.yaml -p "I was charged twice for my monthly plan and I need a short refund update I can send to the customer."
+```
+
 ## Local installation
 
 Prerequisites:

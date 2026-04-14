@@ -31,10 +31,17 @@ def _write_stub_agent_framework(root: Path) -> None:
 
 
             class Agent:
-                def __init__(self, name, instructions, description=None):
+                def __init__(
+                    self,
+                    name,
+                    instructions,
+                    description=None,
+                    require_per_service_call_history_persistence=False,
+                ):
                     self.name = name
                     self.instructions = instructions
                     self.description = description
+                    self.require_per_service_call_history_persistence = require_per_service_call_history_persistence
 
                 async def run(self, prompt, *, options=None, **kwargs):
                     if isinstance(options, dict) and "response_format" in options:
@@ -53,8 +60,20 @@ def _write_stub_agent_framework(root: Path) -> None:
                     self.model = model
                     self.api_key = api_key
 
-                def as_agent(self, *, name, instructions, description=None):
-                    return Agent(name=name, instructions=instructions, description=description)
+                def as_agent(
+                    self,
+                    *,
+                    name,
+                    instructions,
+                    description=None,
+                    require_per_service_call_history_persistence=False,
+                ):
+                    return Agent(
+                        name=name,
+                        instructions=instructions,
+                        description=description,
+                        require_per_service_call_history_persistence=require_per_service_call_history_persistence,
+                    )
             """
         ).strip()
         + "\n",

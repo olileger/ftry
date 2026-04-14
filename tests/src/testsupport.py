@@ -13,7 +13,7 @@ SAMPLE_TEAM_FILE = SAMPLES_DIR / "teams" / "better-prompt" / "team.yaml"
 SEQUENTIAL_SAMPLE_TEAM_FILE = SAMPLES_DIR / "teams" / "seq-support-brief-team" / "team.yaml"
 CONCURRENT_SAMPLE_TEAM_FILE = SAMPLES_DIR / "teams" / "con-release-readiness-team" / "team.yaml"
 GROUP_CHAT_SAMPLE_TEAM_FILE = SAMPLES_DIR / "teams" / "grp-feature-debate-team" / "team.yaml"
-GROUP_CHAT_SAMPLE_TEAM_FILE = SAMPLES_DIR / "teams" / "grp-feature-debate-team" / "team.yaml"
+HANDOFF_SAMPLE_TEAM_FILE = SAMPLES_DIR / "teams" / "han-support-routing-team" / "team.yaml"
 
 
 def strip_ansi(text: str) -> str:
@@ -31,10 +31,17 @@ class FakeAgent:
     last_options: object | None = None
     next_value: object | None = None
 
-    def __init__(self, name: str, instructions: str, description: str | None = None) -> None:
+    def __init__(
+        self,
+        name: str,
+        instructions: str,
+        description: str | None = None,
+        require_per_service_call_history_persistence: bool = False,
+    ) -> None:
         self.name = name
         self.instructions = instructions
         self.description = description
+        self.require_per_service_call_history_persistence = require_per_service_call_history_persistence
 
     async def run(self, prompt: str, *, options: object | None = None, **_: object) -> FakeResult:
         FakeAgent.last_prompt = prompt
@@ -57,8 +64,20 @@ class FakeOpenAIChatCompletionClient:
         FakeOpenAIChatCompletionClient.last_model = model
         FakeOpenAIChatCompletionClient.last_api_key = api_key
 
-    def as_agent(self, *, name: str, instructions: str, description: str | None = None) -> FakeAgent:
-        agent = FakeAgent(name=name, instructions=instructions, description=description)
+    def as_agent(
+        self,
+        *,
+        name: str,
+        instructions: str,
+        description: str | None = None,
+        require_per_service_call_history_persistence: bool = False,
+    ) -> FakeAgent:
+        agent = FakeAgent(
+            name=name,
+            instructions=instructions,
+            description=description,
+            require_per_service_call_history_persistence=require_per_service_call_history_persistence,
+        )
         FakeOpenAIChatCompletionClient.last_agent = agent
         return agent
 
