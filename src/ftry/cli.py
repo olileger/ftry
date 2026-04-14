@@ -6,87 +6,23 @@ import argparse
 import asyncio
 import sys
 import time
-from pathlib import Path
-from typing import Any, Callable, Sequence, TextIO
+from typing import Callable, Sequence, TextIO
 
-from .Agent import (
-    AgentConfig,
-    AgentModelConfig,
-    _create_openai_agent,
-    _load_agent_config as _agent_load_agent_config,
-    _parse_agent_config,
-    _parse_model_config,
-    _run_agent_prompt,
-    _run_openai_agent,
-)
+from .Agent import Agent
 from .Team import (
-    TeamConfig,
-    TeamTerminationConfig,
-    _build_team_participants,
-    _build_team_workflow,
-    _compose_pattern_analysis_text,
-    _contains_any,
-    _count_assistant_messages,
-    _create_team_controller_agent,
-    _has_numbered_steps,
-    _infer_team_pattern,
-    _load_orchestration_builders,
-    _load_team_agent_config as _team_load_team_agent_config,
-    _load_team_config as _team_load_team_config,
-    _normalize_team_pattern,
-    _parse_team_termination,
-    _render_role_summary,
-    _render_team_instructions,
+    _load_team_config,
     _run_team_prompt,
-    _select_handoff_start_agent,
 )
 from .Tools import (
-    AGENT_TRACE_COLORS,
-    BOLD,
-    BRIGHT_BLUE,
     BRIGHT_CYAN,
-    BRIGHT_GREEN,
     BRIGHT_PINK,
     BRIGHT_YELLOW,
-    LINE_COLOR_TOKENS,
     ORANGE,
     PURPLE,
-    RESET,
     FtryCliError,
-    _build_agent_trace_colors,
     _colorize,
-    _display_name,
-    _ensure_trace_logger,
-    _extract_message_text,
-    _extract_messages,
-    _extract_trace_chunk,
-    _format_agent_output,
-    _format_final_team_output,
-    _load_dotenv_function,
     _load_line_banner,
     _load_pop_banner,
-    _load_yaml_mapping,
-    _load_yaml_module,
-    _require_mapping,
-    _require_non_empty_string,
-    _require_optional_string,
-    _require_positive_int,
-    _require_sequence,
-    _resolve_config_path,
-    _resolve_secret,
-    _sanitize_agent_name,
-    _summarize_payload,
-    _summarize_trace_text,
-    _trace,
-    _trace_agent_label,
-    _trace_agent_output,
-    _trace_agent_start,
-    _trace_block,
-    _trace_node_label,
-    _trace_result,
-    _trace_route,
-    _trace_team_label,
-    _trace_team_start,
 )
 
 
@@ -179,62 +115,6 @@ def _render_pop_animation(*, stream: TextIO | None = None, sleep: Callable[[floa
         target_stream.flush()
 
 
-def _find_dotenv_path(agent_path: Path) -> Path | None:
-    search_roots = [Path.cwd(), agent_path.resolve().parent]
-
-    seen: set[Path] = set()
-    for root in search_roots:
-        for candidate_dir in (root, *root.parents):
-            if candidate_dir in seen:
-                continue
-            seen.add(candidate_dir)
-
-            candidate = candidate_dir / ".env"
-            if candidate.is_file():
-                return candidate
-
-    return None
-
-
-def _load_dotenv_for_config(config_path: Path) -> None:
-    dotenv_path = _find_dotenv_path(config_path)
-    if dotenv_path is None:
-        return
-
-    load_dotenv = _load_dotenv_function()
-    load_dotenv(dotenv_path=dotenv_path, override=False)
-
-
-def _load_agent_config(agent_file: str | Path, *, base_dir: Path | None = None) -> AgentConfig:
-    return _agent_load_agent_config(
-        agent_file,
-        base_dir=base_dir,
-        resolve_config_path=_resolve_config_path,
-        load_dotenv_for_config=_load_dotenv_for_config,
-        load_yaml_mapping=_load_yaml_mapping,
-    )
-
-
-def _load_team_agent_config(raw_agent: Any, *, team_dir: Path) -> AgentConfig:
-    return _team_load_team_agent_config(
-        raw_agent,
-        team_dir=team_dir,
-        load_agent_config=_load_agent_config,
-        parse_agent_config=_parse_agent_config,
-    )
-
-
-def _load_team_config(team_file: str | Path) -> TeamConfig:
-    return _team_load_team_config(
-        team_file,
-        resolve_config_path=_resolve_config_path,
-        load_dotenv_for_config=_load_dotenv_for_config,
-        load_yaml_mapping=_load_yaml_mapping,
-        load_team_agent_config=_load_team_agent_config,
-        parse_model_config=_parse_model_config,
-    )
-
-
 def _run_pop_command(agent_file: str | None, team_file: str | None, prompt: str) -> int:
     if team_file is not None:
         config = _load_team_config(team_file)
@@ -244,9 +124,9 @@ def _run_pop_command(agent_file: str | None, team_file: str | None, prompt: str)
 
     if agent_file is None:
         raise FtryCliError("Either `-a/--agent-file` or `-t/--team-file` must be provided.")
-    config = _load_agent_config(agent_file)
+    agent = Agent.from_file(agent_file)
     _render_pop_animation()
-    asyncio.run(_run_agent_prompt(config, prompt))
+    asyncio.run(agent.run(prompt))
     return 0
 
 

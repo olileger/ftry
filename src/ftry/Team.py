@@ -5,12 +5,9 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from .Agent import (
+    Agent,
     AgentConfig,
     AgentModelConfig,
-    _create_openai_agent,
-    _load_agent_config,
-    _parse_agent_config,
-    _parse_model_config,
 )
 from .Tools import (
     FtryCliError,
@@ -102,19 +99,19 @@ def _load_team_agent_config(
     raw_agent: Any,
     *,
     team_dir: Path,
-    load_agent_config: Callable[[str | Path], AgentConfig] | Callable[..., AgentConfig] = _load_agent_config,
-    parse_agent_config: Callable[[Mapping[str, Any]], AgentConfig] | Callable[..., AgentConfig] = _parse_agent_config,
+    load_agent: Callable[..., Agent] = Agent.from_file,
+    load_inline_agent: Callable[..., Agent] = Agent.from_mapping,
 ) -> AgentConfig:
     if isinstance(raw_agent, str):
-        return load_agent_config(raw_agent, base_dir=team_dir)
+        return load_agent(raw_agent, base_dir=team_dir).config
 
     agent_config = _require_mapping(raw_agent, "agents[]", "team")
     if "file" in agent_config:
         if len(agent_config) != 1:
             raise FtryCliError("Invalid `agents[]` entry in team YAML: `file` references cannot be mixed with inline fields.")
-        return load_agent_config(_require_non_empty_string(agent_config.get("file"), "agents[].file", "team"), base_dir=team_dir)
+        return load_agent(_require_non_empty_string(agent_config.get("file"), "agents[].file", "team"), base_dir=team_dir).config
 
-    return parse_agent_config(agent_config, config_kind="team agent")
+    return load_inline_agent(agent_config, config_kind="team agent").config
 
 
 def _parse_team_termination(raw_termination: Any) -> TeamTerminationConfig:
@@ -136,7 +133,7 @@ def _load_team_config(
     load_dotenv_for_config: Callable[[Path], None] = _load_dotenv_for_config,
     load_yaml_mapping: Callable[[Path], Mapping[str, Any]] | Callable[..., Mapping[str, Any]] = _load_yaml_mapping,
     load_team_agent_config: Callable[[Any], AgentConfig] | Callable[..., AgentConfig] = _load_team_agent_config,
-    parse_model_config: Callable[[Any], AgentModelConfig | None] | Callable[..., AgentModelConfig | None] = _parse_model_config,
+    parse_model_config: Callable[..., AgentModelConfig | None] = AgentModelConfig.from_mapping,
 ) -> TeamConfig:
     team_path = resolve_config_path(team_file)
     if not team_path.is_file():
@@ -228,13 +225,14 @@ def _create_team_controller_agent(team: TeamConfig, *, instructions: str) -> Any
     if team.model is None:
         return None
 
-    return _create_openai_agent(
+    return Agent(
         AgentConfig(
             name=team.name,
             description=team.description,
             instructions=instructions,
             model=team.model,
-        ),
+        )
+    ).create_participant(
         name_override=_sanitize_agent_name(team.name, fallback_prefix="team"),
     )
 
@@ -268,7 +266,12 @@ def _build_team_participants(team: TeamConfig, *, extra_instructions: str | None
             suffix += 1
         used_names.add(unique_name)
         author_name_map[unique_name] = agent.name
-        participants.append(_create_openai_agent(agent, extra_instructions=extra_instructions, name_override=unique_name))
+        participants.append(
+            Agent(agent).create_participant(
+                extra_instructions=extra_instructions,
+                name_override=unique_name,
+            )
+        )
 
     return participants, author_name_map
 
