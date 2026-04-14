@@ -34,13 +34,13 @@ In an interactive terminal, it plays a slightly longer neon ASCII `POP` skateboa
 Example:
 
 ```
-ftry pop -a .\samples\poete.yaml -p "Write a poem about rain"
+ftry pop -a .\samples\agents\poete.yaml -p "Write a poem about rain"
 ```
 
 Team example:
 
 ```powershell
-ftry pop -t .\samples\team.yaml -p "Build a better prompt to summarize this text"
+ftry pop -t .\samples\teams\better-prompt\team.yaml -p "Build a better prompt to summarize this text"
 ```
 
 ## Local installation

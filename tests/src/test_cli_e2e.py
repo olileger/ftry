@@ -9,7 +9,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 SRC_DIR = REPO_ROOT / "src"
 
 
@@ -307,7 +307,7 @@ class CliEndToEndTests(unittest.TestCase):
         result = self._run_cli(
             "pop",
             "-a",
-            r".\samples\poete.yaml",
+            r".\samples\agents\poete.yaml",
             "-p",
             "Ecris un poeme sur la pluie",
             with_agent_framework=True,
@@ -323,7 +323,7 @@ class CliEndToEndTests(unittest.TestCase):
         result = self._run_cli(
             "pop",
             "-t",
-            r".\samples\team.yaml",
+            r".\samples\teams\better-prompt\team.yaml",
             "-p",
             "Ameliore ce prompt",
             with_agent_framework=True,
@@ -332,7 +332,7 @@ class CliEndToEndTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         self.assertEqual(result.stdout.strip(), "")
         plain_stderr = _strip_ansi(result.stderr)
-        self.assertIn("TEAM Better Prompt team | pattern: group-chat | input:", plain_stderr)
+        self.assertIn("TEAM Better Prompt team | pattern: magentic | input:", plain_stderr)
         self.assertIn("TEAM Better Prompt team --> Prompter | input:", plain_stderr)
-        self.assertIn("TEAM Better Prompt team <-- Reviewer | final-output:", plain_stderr)
+        self.assertIn("TEAM Better Prompt team <-- Runner | final-output:", plain_stderr)
 

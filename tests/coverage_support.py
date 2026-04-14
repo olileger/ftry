@@ -28,7 +28,7 @@ def iter_tests(suite: unittest.TestSuite):
 def discover_tests() -> unittest.TestSuite:
     loader = unittest.defaultTestLoader
     return loader.discover(
-        start_dir=str(REPO_ROOT / "tests"),
+        start_dir=str(REPO_ROOT / "tests" / "src"),
         pattern="test_*.py",
         top_level_dir=str(REPO_ROOT),
     )
