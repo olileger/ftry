@@ -2,13 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
-from .Agent import (
-    Agent,
-    AgentConfig,
-    AgentModelConfig,
-)
+from .Agent import Agent, AgentConfig, AgentModelConfig
 from .Tools import (
     FtryCliError,
     _build_agent_trace_colors,
@@ -23,8 +19,8 @@ from .Tools import (
     _require_optional_string,
     _require_positive_int,
     _require_sequence,
-    _resolve_message_author,
     _resolve_config_path,
+    _resolve_message_author,
     _sanitize_agent_name,
     _summarize_payload,
     _summarize_trace_text,
@@ -83,255 +79,6 @@ class TeamConfig:
     description: str | None = None
     pattern: str | None = None
     termination: TeamTerminationConfig = field(default_factory=TeamTerminationConfig)
-
-
-def _normalize_team_pattern(value: str) -> str:
-    normalized = value.strip().lower().replace("_", "-").replace(" ", "-")
-    pattern = TEAM_PATTERN_ALIASES.get(normalized)
-    if pattern is None:
-        raise FtryCliError(
-            f"Unsupported team pattern `{value}`. Expected one of: sequential, concurrent, handoff, group-chat, magentic."
-        )
-    return pattern
-
-
-def _load_team_agent_config(
-    raw_agent: Any,
-    *,
-    team_dir: Path,
-    load_agent: Callable[..., Agent] = Agent.from_file,
-    load_inline_agent: Callable[..., Agent] = Agent.from_mapping,
-) -> AgentConfig:
-    if isinstance(raw_agent, str):
-        return load_agent(raw_agent, base_dir=team_dir).config
-
-    agent_config = _require_mapping(raw_agent, "agents[]", "team")
-    if "file" in agent_config:
-        if len(agent_config) != 1:
-            raise FtryCliError("Invalid `agents[]` entry in team YAML: `file` references cannot be mixed with inline fields.")
-        return load_agent(_require_non_empty_string(agent_config.get("file"), "agents[].file", "team"), base_dir=team_dir).config
-
-    return load_inline_agent(agent_config, config_kind="team agent").config
-
-
-def _parse_team_termination(raw_termination: Any) -> TeamTerminationConfig:
-    if raw_termination is None:
-        return TeamTerminationConfig()
-
-    termination_config = _require_mapping(raw_termination, "termination", "team")
-    max_turns = termination_config.get("max-turns")
-    if max_turns is None:
-        return TeamTerminationConfig()
-
-    return TeamTerminationConfig(max_turns=_require_positive_int(max_turns, "termination.max-turns", "team"))
-
-
-def _load_team_config(
-    team_file: str | Path,
-    *,
-    resolve_config_path: Callable[[str | Path], Path] | Callable[..., Path] = _resolve_config_path,
-    load_dotenv_for_config: Callable[[Path], None] = _load_dotenv_for_config,
-    load_yaml_mapping: Callable[[Path], Mapping[str, Any]] | Callable[..., Mapping[str, Any]] = _load_yaml_mapping,
-    load_team_agent_config: Callable[[Any], AgentConfig] | Callable[..., AgentConfig] = _load_team_agent_config,
-    parse_model_config: Callable[..., AgentModelConfig | None] = AgentModelConfig.from_mapping,
-) -> TeamConfig:
-    team_path = resolve_config_path(team_file)
-    if not team_path.is_file():
-        raise FtryCliError(f"Team file not found: {team_path}")
-
-    load_dotenv_for_config(team_path)
-    config = load_yaml_mapping(team_path, config_kind="team")
-    raw_agents = _require_sequence(config.get("agents"), "agents", "team")
-    agents = tuple(load_team_agent_config(raw_agent, team_dir=team_path.parent) for raw_agent in raw_agents)
-    if not agents:
-        raise FtryCliError("Invalid or missing `agents` list in team YAML.")
-
-    raw_pattern = config.get("pattern", config.get("orchestration"))
-    return TeamConfig(
-        name=_require_non_empty_string(config.get("name"), "name", "team"),
-        description=_require_optional_string(config.get("description"), "description", "team"),
-        instructions=_require_non_empty_string(config.get("prompt"), "prompt", "team"),
-        agents=agents,
-        model=parse_model_config(config.get("model"), config_kind="team", required=False),
-        pattern=_normalize_team_pattern(raw_pattern) if raw_pattern is not None else None,
-        termination=_parse_team_termination(config.get("termination")),
-    )
-
-
-def _render_role_summary(agent: AgentConfig) -> str:
-    source = agent.description or agent.instructions
-    return " ".join(source.split())
-
-
-def _render_team_instructions(team: TeamConfig) -> str:
-    participants = ", ".join(agent.name for agent in team.agents)
-    roles = "\n".join(f"- {agent.name}: {_render_role_summary(agent)}" for agent in team.agents)
-    return team.instructions.replace("{participants}", participants).replace("{roles}", roles)
-
-
-def _compose_pattern_analysis_text(team: TeamConfig) -> str:
-    fragments = [team.name, team.description or "", team.instructions]
-    for agent in team.agents:
-        fragments.extend((agent.name, agent.description or "", agent.instructions))
-    return " ".join(fragment for fragment in fragments if fragment).lower()
-
-
-def _contains_any(text: str, hints: Sequence[str]) -> bool:
-    return any(hint in text for hint in hints)
-
-
-def _has_numbered_steps(text: str) -> bool:
-    lowered = text.lower()
-    return "1." in lowered and "2." in lowered
-
-
-def _infer_team_pattern(team: TeamConfig) -> str:
-    if team.pattern is not None:
-        return team.pattern
-
-    analysis_text = _compose_pattern_analysis_text(team)
-    if _contains_any(analysis_text, HANDOFF_HINTS):
-        return "handoff"
-    if _contains_any(analysis_text, MAGENTIC_HINTS):
-        return "magentic"
-    if _contains_any(analysis_text, CONCURRENT_HINTS) and not _contains_any(analysis_text, SEQUENTIAL_HINTS):
-        return "concurrent"
-    if _contains_any(analysis_text, GROUP_CHAT_HINTS):
-        return "group-chat"
-    if _contains_any(analysis_text, SEQUENTIAL_HINTS) or _has_numbered_steps(team.instructions):
-        return "sequential"
-    return "group-chat"
-
-
-def _load_orchestration_builders() -> tuple[Any, Any, Any, Any, Any]:
-    try:
-        from agent_framework.orchestrations import (
-            ConcurrentBuilder,
-            GroupChatBuilder,
-            HandoffBuilder,
-            MagenticBuilder,
-            SequentialBuilder,
-        )
-    except ImportError as exc:  # pragma: no cover - covered by CLI error path
-        raise FtryCliError(
-            "Microsoft Agent Framework orchestration support is required for `ftry pop -t`. "
-            "Reinstall the project with `python -m pip install -e .`."
-        ) from exc
-
-    return SequentialBuilder, ConcurrentBuilder, HandoffBuilder, GroupChatBuilder, MagenticBuilder
-
-
-def _create_team_controller_agent(team: TeamConfig, *, instructions: str) -> Any | None:
-    if team.model is None:
-        return None
-
-    return Agent(
-        AgentConfig(
-            name=team.name,
-            description=team.description,
-            instructions=instructions,
-            model=team.model,
-        )
-    ).create_participant(
-        name_override=_sanitize_agent_name(team.name, fallback_prefix="team"),
-    )
-
-
-def _select_handoff_start_agent(agents: Sequence[Any]) -> Any:
-    for agent in agents:
-        name = getattr(agent, "name", "")
-        description = getattr(agent, "description", "")
-        instructions = getattr(agent, "instructions", "")
-        analysis_text = f"{name} {description} {instructions}".lower()
-        if _contains_any(analysis_text, HANDOFF_START_HINTS):
-            return agent
-    return agents[0]
-
-
-def _count_assistant_messages(conversation: list[Any]) -> int:
-    return sum(1 for message in conversation if getattr(message, "role", None) == "assistant")
-
-
-def _build_team_participants(team: TeamConfig, *, extra_instructions: str | None) -> tuple[list[Any], dict[str, str]]:
-    participants: list[Any] = []
-    author_name_map: dict[str, str] = {}
-    used_names: set[str] = set()
-
-    for index, agent in enumerate(team.agents, start=1):
-        candidate_name = _sanitize_agent_name(agent.name, fallback_prefix=f"agent-{index}")
-        unique_name = candidate_name
-        suffix = 2
-        while unique_name in used_names:
-            unique_name = f"{candidate_name}-{suffix}"
-            suffix += 1
-        used_names.add(unique_name)
-        author_name_map[unique_name] = agent.name
-        participants.append(
-            Agent(agent).create_participant(
-                extra_instructions=extra_instructions,
-                name_override=unique_name,
-            )
-        )
-
-    return participants, author_name_map
-
-
-def _build_handoff_workflow(team: TeamConfig, *, participants: Sequence[Any], handoff_builder_type: Any) -> Any:
-    handoff_builder = handoff_builder_type(name=team.name, participants=participants, description=team.description)
-    handoff_builder = handoff_builder.with_start_agent(_select_handoff_start_agent(participants))
-    autonomous_kwargs: dict[str, Any] = {"agents": participants}
-    max_turns = team.termination.max_turns
-    if max_turns is not None:
-        autonomous_kwargs["turn_limits"] = {getattr(agent, "name"): max_turns for agent in participants}
-        handoff_builder = handoff_builder.with_termination_condition(
-            lambda conversation, limit=max_turns: _count_assistant_messages(conversation) >= limit
-        )
-    return handoff_builder.with_autonomous_mode(**autonomous_kwargs).build()
-
-
-def _build_team_workflow(team: TeamConfig) -> tuple[str, Any, Mapping[str, str]]:
-    pattern = _infer_team_pattern(team)
-    rendered_instructions = _render_team_instructions(team)
-    inject_team_context = pattern in TEAM_CONTEXT_PATTERNS or team.model is None
-    participants, author_name_map = _build_team_participants(
-        team,
-        extra_instructions=rendered_instructions if inject_team_context else None,
-    )
-    SequentialBuilder, ConcurrentBuilder, HandoffBuilder, GroupChatBuilder, MagenticBuilder = _load_orchestration_builders()
-    team_internal_name = _sanitize_agent_name(team.name, fallback_prefix="team")
-    author_name_map[team_internal_name] = team.name
-
-    if pattern in {"sequential", "concurrent"}:
-        builder = {"sequential": SequentialBuilder, "concurrent": ConcurrentBuilder}[pattern]
-        return pattern, builder(participants=participants, intermediate_outputs=True).build(), author_name_map
-
-    if pattern == "handoff":
-        return pattern, _build_handoff_workflow(team, participants=participants, handoff_builder_type=HandoffBuilder), author_name_map
-
-    controller_agent = _create_team_controller_agent(team, instructions=rendered_instructions)
-    if pattern == "group-chat":
-        return (
-            pattern,
-            GroupChatBuilder(
-                participants=participants,
-                orchestrator_agent=controller_agent,
-                orchestrator_name=team.name,
-                max_rounds=team.termination.max_turns,
-                intermediate_outputs=True,
-            ).build(),
-            author_name_map,
-        )
-
-    return (
-        pattern,
-        MagenticBuilder(
-            participants=participants,
-            manager_agent=controller_agent,
-            max_round_count=team.termination.max_turns,
-            intermediate_outputs=True,
-        ).build(),
-        author_name_map,
-    )
 
 
 @dataclass
@@ -421,99 +168,375 @@ class _TeamTraceState:
             )
             return
 
-        _trace('%s | final-output:%s', _trace_team_label(self.team_name), _trace_block(rendered_output))
+        _trace("%s | final-output:%s", _trace_team_label(self.team_name), _trace_block(rendered_output))
 
 
-def _handle_group_chat_event(event: Any, state: _TeamTraceState, author_name_map: Mapping[str, str]) -> None:
-    participant_name = _display_name(getattr(event.data, "participant_name", None), author_name_map)
-    if "RequestSent" not in type(event.data).__name__:
-        return
+class Team:
+    def __init__(self, config: TeamConfig):
+        self._config = config
 
-    state.expected_invoked_executor = participant_name
-    state.flush_buffer(next_executor=participant_name)
-    state.trace_route(state.team_name, participant_name)
-    state.last_route_source = state.team_name
+    @classmethod
+    def from_file(cls, team_file: str | Path) -> Team:
+        team_path = _resolve_config_path(team_file)
+        if not team_path.is_file():
+            raise FtryCliError(f"Team file not found: {team_path}")
 
+        _load_dotenv_for_config(team_path)
+        config = _load_yaml_mapping(team_path, config_kind="team")
+        return cls(cls._parse_config(config, team_dir=team_path.parent))
 
-def _handle_handoff_event(event: Any, state: _TeamTraceState, author_name_map: Mapping[str, str]) -> None:
-    source = _display_name(getattr(event.data, "source", None), author_name_map)
-    target = _display_name(getattr(event.data, "target", None), author_name_map)
-    state.expected_invoked_executor = target
-    state.flush_buffer(next_executor=target)
-    state.trace_route(source, target)
-    state.last_route_source = source
+    @classmethod
+    def from_mapping(cls, config: Mapping[str, Any], *, team_dir: Path | None = None) -> Team:
+        return cls(cls._parse_config(config, team_dir=team_dir))
 
+    @property
+    def config(self) -> TeamConfig:
+        return self._config
 
-def _handle_executor_invoked_event(event: Any, state: _TeamTraceState, author_name_map: Mapping[str, str]) -> None:
-    if not event.executor_id:
-        return
+    @property
+    def name(self) -> str:
+        return self._config.name
 
-    invoked_executor = _display_name(event.executor_id, author_name_map)
-    if state.pattern in TEAM_REQUEST_DRIVEN_PATTERNS and state.expected_invoked_executor is not None:
-        if invoked_executor != state.expected_invoked_executor:
+    @property
+    def description(self) -> str | None:
+        return self._config.description
+
+    @property
+    def instructions(self) -> str:
+        return self._config.instructions
+
+    @property
+    def agents(self) -> tuple[AgentConfig, ...]:
+        return self._config.agents
+
+    @property
+    def model(self) -> AgentModelConfig | None:
+        return self._config.model
+
+    @property
+    def pattern(self) -> str | None:
+        return self._config.pattern
+
+    @property
+    def termination(self) -> TeamTerminationConfig:
+        return self._config.termination
+
+    async def run(self, prompt: str) -> str:
+        pattern, workflow, author_name_map = self._build_workflow()
+        state = _TeamTraceState(
+            pattern=pattern,
+            team_name=self.name,
+            agent_trace_colors=_build_agent_trace_colors([agent.name for agent in self.agents]),
+            last_visible_input=prompt,
+        )
+
+        _trace_team_start(state.team_name, state.pattern, prompt)
+
+        stream = workflow.run(prompt, stream=True)
+        async for event in stream:
+            if event.type == "group_chat":
+                self._handle_group_chat_event(event, state, author_name_map)
+                continue
+
+            if event.type == "handoff_sent":
+                self._handle_handoff_event(event, state, author_name_map)
+                continue
+
+            if event.type == "executor_invoked":
+                self._handle_executor_invoked_event(event, state, author_name_map)
+                continue
+
+            if event.type == "output":
+                self._handle_output_event(event, state, author_name_map)
+
+        state.flush_buffer()
+        rendered_output = _format_final_team_output(state.final_payload, author_name_map=author_name_map)
+        state.trace_final_output(state.final_payload, rendered_output, author_name_map)
+        return rendered_output
+
+    @classmethod
+    def _parse_config(cls, config: Mapping[str, Any], *, team_dir: Path | None) -> TeamConfig:
+        raw_agents = _require_sequence(config.get("agents"), "agents", "team")
+        agents = tuple(cls._load_agent_config(raw_agent, team_dir=team_dir) for raw_agent in raw_agents)
+        if not agents:
+            raise FtryCliError("Invalid or missing `agents` list in team YAML.")
+
+        raw_pattern = config.get("pattern", config.get("orchestration"))
+        return TeamConfig(
+            name=_require_non_empty_string(config.get("name"), "name", "team"),
+            description=_require_optional_string(config.get("description"), "description", "team"),
+            instructions=_require_non_empty_string(config.get("prompt"), "prompt", "team"),
+            agents=agents,
+            model=AgentModelConfig.from_mapping(config.get("model"), config_kind="team", required=False),
+            pattern=cls._normalize_pattern(raw_pattern) if raw_pattern is not None else None,
+            termination=cls._parse_termination(config.get("termination")),
+        )
+
+    @classmethod
+    def _load_agent_config(cls, raw_agent: Any, *, team_dir: Path | None) -> AgentConfig:
+        if isinstance(raw_agent, str):
+            return Agent.from_file(raw_agent, base_dir=team_dir).config
+
+        agent_config = _require_mapping(raw_agent, "agents[]", "team")
+        if "file" in agent_config:
+            if len(agent_config) != 1:
+                raise FtryCliError("Invalid `agents[]` entry in team YAML: `file` references cannot be mixed with inline fields.")
+            return Agent.from_file(
+                _require_non_empty_string(agent_config.get("file"), "agents[].file", "team"),
+                base_dir=team_dir,
+            ).config
+
+        return Agent.from_mapping(agent_config, config_kind="team agent").config
+
+    @staticmethod
+    def _parse_termination(raw_termination: Any) -> TeamTerminationConfig:
+        if raw_termination is None:
+            return TeamTerminationConfig()
+
+        termination_config = _require_mapping(raw_termination, "termination", "team")
+        max_turns = termination_config.get("max-turns")
+        if max_turns is None:
+            return TeamTerminationConfig()
+
+        return TeamTerminationConfig(max_turns=_require_positive_int(max_turns, "termination.max-turns", "team"))
+
+    @staticmethod
+    def _normalize_pattern(value: str) -> str:
+        normalized = value.strip().lower().replace("_", "-").replace(" ", "-")
+        pattern = TEAM_PATTERN_ALIASES.get(normalized)
+        if pattern is None:
+            raise FtryCliError(
+                f"Unsupported team pattern `{value}`. Expected one of: sequential, concurrent, handoff, group-chat, magentic."
+            )
+        return pattern
+
+    @staticmethod
+    def _render_role_summary(agent: AgentConfig) -> str:
+        source = agent.description or agent.instructions
+        return " ".join(source.split())
+
+    def _render_instructions(self) -> str:
+        participants = ", ".join(agent.name for agent in self.agents)
+        roles = "\n".join(f"- {agent.name}: {self._render_role_summary(agent)}" for agent in self.agents)
+        return self.instructions.replace("{participants}", participants).replace("{roles}", roles)
+
+    def _compose_pattern_analysis_text(self) -> str:
+        fragments = [self.name, self.description or "", self.instructions]
+        for agent in self.agents:
+            fragments.extend((agent.name, agent.description or "", agent.instructions))
+        return " ".join(fragment for fragment in fragments if fragment).lower()
+
+    @staticmethod
+    def _contains_any(text: str, hints: Sequence[str]) -> bool:
+        return any(hint in text for hint in hints)
+
+    @staticmethod
+    def _has_numbered_steps(text: str) -> bool:
+        lowered = text.lower()
+        return "1." in lowered and "2." in lowered
+
+    def _infer_pattern(self) -> str:
+        if self.pattern is not None:
+            return self.pattern
+
+        analysis_text = self._compose_pattern_analysis_text()
+        if self._contains_any(analysis_text, HANDOFF_HINTS):
+            return "handoff"
+        if self._contains_any(analysis_text, MAGENTIC_HINTS):
+            return "magentic"
+        if self._contains_any(analysis_text, CONCURRENT_HINTS) and not self._contains_any(analysis_text, SEQUENTIAL_HINTS):
+            return "concurrent"
+        if self._contains_any(analysis_text, GROUP_CHAT_HINTS):
+            return "group-chat"
+        if self._contains_any(analysis_text, SEQUENTIAL_HINTS) or self._has_numbered_steps(self.instructions):
+            return "sequential"
+        return "group-chat"
+
+    @staticmethod
+    def _load_orchestration_builders() -> tuple[Any, Any, Any, Any, Any]:
+        try:
+            from agent_framework.orchestrations import (
+                ConcurrentBuilder,
+                GroupChatBuilder,
+                HandoffBuilder,
+                MagenticBuilder,
+                SequentialBuilder,
+            )
+        except ImportError as exc:  # pragma: no cover - covered by CLI error path
+            raise FtryCliError(
+                "Microsoft Agent Framework orchestration support is required for `ftry pop -t`. "
+                "Reinstall the project with `python -m pip install -e .`."
+            ) from exc
+
+        return SequentialBuilder, ConcurrentBuilder, HandoffBuilder, GroupChatBuilder, MagenticBuilder
+
+    def _create_controller_agent(self, *, instructions: str) -> Any | None:
+        if self.model is None:
+            return None
+
+        return Agent(
+            AgentConfig(
+                name=self.name,
+                description=self.description,
+                instructions=instructions,
+                model=self.model,
+            )
+        ).create_participant(
+            name_override=_sanitize_agent_name(self.name, fallback_prefix="team"),
+        )
+
+    @staticmethod
+    def _select_handoff_start_agent(agents: Sequence[Any]) -> Any:
+        for agent in agents:
+            name = getattr(agent, "name", "")
+            description = getattr(agent, "description", "")
+            instructions = getattr(agent, "instructions", "")
+            analysis_text = f"{name} {description} {instructions}".lower()
+            if Team._contains_any(analysis_text, HANDOFF_START_HINTS):
+                return agent
+        return agents[0]
+
+    @staticmethod
+    def _count_assistant_messages(conversation: list[Any]) -> int:
+        return sum(1 for message in conversation if getattr(message, "role", None) == "assistant")
+
+    def _build_participants(self, *, extra_instructions: str | None) -> tuple[list[Any], dict[str, str]]:
+        participants: list[Any] = []
+        author_name_map: dict[str, str] = {}
+        used_names: set[str] = set()
+
+        for index, agent in enumerate(self.agents, start=1):
+            candidate_name = _sanitize_agent_name(agent.name, fallback_prefix=f"agent-{index}")
+            unique_name = candidate_name
+            suffix = 2
+            while unique_name in used_names:
+                unique_name = f"{candidate_name}-{suffix}"
+                suffix += 1
+            used_names.add(unique_name)
+            author_name_map[unique_name] = agent.name
+            participants.append(
+                Agent(agent).create_participant(
+                    extra_instructions=extra_instructions,
+                    name_override=unique_name,
+                )
+            )
+
+        return participants, author_name_map
+
+    def _build_handoff_workflow(self, *, participants: Sequence[Any], handoff_builder_type: Any) -> Any:
+        handoff_builder = handoff_builder_type(name=self.name, participants=participants, description=self.description)
+        handoff_builder = handoff_builder.with_start_agent(self._select_handoff_start_agent(participants))
+        autonomous_kwargs: dict[str, Any] = {"agents": participants}
+        max_turns = self.termination.max_turns
+        if max_turns is not None:
+            autonomous_kwargs["turn_limits"] = {getattr(agent, "name"): max_turns for agent in participants}
+            handoff_builder = handoff_builder.with_termination_condition(
+                lambda conversation, limit=max_turns: self._count_assistant_messages(conversation) >= limit
+            )
+        return handoff_builder.with_autonomous_mode(**autonomous_kwargs).build()
+
+    def _build_workflow(self) -> tuple[str, Any, Mapping[str, str]]:
+        pattern = self._infer_pattern()
+        rendered_instructions = self._render_instructions()
+        inject_team_context = pattern in TEAM_CONTEXT_PATTERNS or self.model is None
+        participants, author_name_map = self._build_participants(
+            extra_instructions=rendered_instructions if inject_team_context else None,
+        )
+        SequentialBuilder, ConcurrentBuilder, HandoffBuilder, GroupChatBuilder, MagenticBuilder = (
+            self._load_orchestration_builders()
+        )
+        team_internal_name = _sanitize_agent_name(self.name, fallback_prefix="team")
+        author_name_map[team_internal_name] = self.name
+
+        if pattern in {"sequential", "concurrent"}:
+            builder = {"sequential": SequentialBuilder, "concurrent": ConcurrentBuilder}[pattern]
+            return pattern, builder(participants=participants, intermediate_outputs=True).build(), author_name_map
+
+        if pattern == "handoff":
+            return pattern, self._build_handoff_workflow(participants=participants, handoff_builder_type=HandoffBuilder), author_name_map
+
+        controller_agent = self._create_controller_agent(instructions=rendered_instructions)
+        if pattern == "group-chat":
+            return (
+                pattern,
+                GroupChatBuilder(
+                    participants=participants,
+                    orchestrator_agent=controller_agent,
+                    orchestrator_name=self.name,
+                    max_rounds=self.termination.max_turns,
+                    intermediate_outputs=True,
+                ).build(),
+                author_name_map,
+            )
+
+        return (
+            pattern,
+            MagenticBuilder(
+                participants=participants,
+                manager_agent=controller_agent,
+                max_round_count=self.termination.max_turns,
+                intermediate_outputs=True,
+            ).build(),
+            author_name_map,
+        )
+
+    @staticmethod
+    def _handle_group_chat_event(event: Any, state: _TeamTraceState, author_name_map: Mapping[str, str]) -> None:
+        participant_name = _display_name(getattr(event.data, "participant_name", None), author_name_map)
+        if "RequestSent" not in type(event.data).__name__:
             return
-        state.expected_invoked_executor = None
 
-    state.flush_buffer(next_executor=invoked_executor)
-    if state.pattern == "sequential":
-        state.trace_route(state.last_route_source, invoked_executor)
-        state.last_route_source = invoked_executor
-    elif state.pattern in TEAM_DIRECT_ROUTE_PATTERNS:
-        state.trace_route(state.team_name, invoked_executor)
+        state.expected_invoked_executor = participant_name
+        state.flush_buffer(next_executor=participant_name)
+        state.trace_route(state.team_name, participant_name)
         state.last_route_source = state.team_name
 
+    @staticmethod
+    def _handle_handoff_event(event: Any, state: _TeamTraceState, author_name_map: Mapping[str, str]) -> None:
+        source = _display_name(getattr(event.data, "source", None), author_name_map)
+        target = _display_name(getattr(event.data, "target", None), author_name_map)
+        state.expected_invoked_executor = target
+        state.flush_buffer(next_executor=target)
+        state.trace_route(source, target)
+        state.last_route_source = source
 
-def _handle_output_event(event: Any, state: _TeamTraceState, author_name_map: Mapping[str, str]) -> None:
-    state.final_payload = event.data
-    output_summary = _summarize_payload(event.data, author_name_map=author_name_map)
-    if not output_summary:
-        return
+    @staticmethod
+    def _handle_executor_invoked_event(event: Any, state: _TeamTraceState, author_name_map: Mapping[str, str]) -> None:
+        if not event.executor_id:
+            return
 
-    producer = _display_name(event.executor_id, author_name_map)
-    if producer == state.team_name:
-        state.flush_buffer(next_executor=producer)
-        state.last_visible_input = output_summary
-        return
+        invoked_executor = _display_name(event.executor_id, author_name_map)
+        if state.pattern in TEAM_REQUEST_DRIVEN_PATTERNS and state.expected_invoked_executor is not None:
+            if invoked_executor != state.expected_invoked_executor:
+                return
+            state.expected_invoked_executor = None
 
-    if state.active_executor is None:
-        state.active_executor = producer
-    elif state.active_executor != producer:
-        state.flush_buffer(next_executor=producer)
+        state.flush_buffer(next_executor=invoked_executor)
+        if state.pattern == "sequential":
+            state.trace_route(state.last_route_source, invoked_executor)
+            state.last_route_source = invoked_executor
+        elif state.pattern in TEAM_DIRECT_ROUTE_PATTERNS:
+            state.trace_route(state.team_name, invoked_executor)
+            state.last_route_source = state.team_name
 
-    raw_chunk = _extract_trace_chunk(event.data)
-    if raw_chunk:
-        state.buffered_outputs.append(raw_chunk)
+    @staticmethod
+    def _handle_output_event(event: Any, state: _TeamTraceState, author_name_map: Mapping[str, str]) -> None:
+        state.final_payload = event.data
+        output_summary = _summarize_payload(event.data, author_name_map=author_name_map)
+        if not output_summary:
+            return
 
+        producer = _display_name(event.executor_id, author_name_map)
+        if producer == state.team_name:
+            state.flush_buffer(next_executor=producer)
+            state.last_visible_input = output_summary
+            return
 
-async def _run_team_prompt(team: TeamConfig, prompt: str) -> str:
-    pattern, workflow, author_name_map = _build_team_workflow(team)
-    state = _TeamTraceState(
-        pattern=pattern,
-        team_name=team.name,
-        agent_trace_colors=_build_agent_trace_colors([agent.name for agent in team.agents]),
-        last_visible_input=prompt,
-    )
+        if state.active_executor is None:
+            state.active_executor = producer
+        elif state.active_executor != producer:
+            state.flush_buffer(next_executor=producer)
 
-    _trace_team_start(state.team_name, state.pattern, prompt)
-
-    stream = workflow.run(prompt, stream=True)
-    async for event in stream:
-        if event.type == "group_chat":
-            _handle_group_chat_event(event, state, author_name_map)
-            continue
-
-        if event.type == "handoff_sent":
-            _handle_handoff_event(event, state, author_name_map)
-            continue
-
-        if event.type == "executor_invoked":
-            _handle_executor_invoked_event(event, state, author_name_map)
-            continue
-
-        if event.type == "output":
-            _handle_output_event(event, state, author_name_map)
-
-    state.flush_buffer()
-    rendered_output = _format_final_team_output(state.final_payload, author_name_map=author_name_map)
-    state.trace_final_output(state.final_payload, rendered_output, author_name_map)
-    return rendered_output
+        raw_chunk = _extract_trace_chunk(event.data)
+        if raw_chunk:
+            state.buffered_outputs.append(raw_chunk)

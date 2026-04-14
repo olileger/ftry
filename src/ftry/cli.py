@@ -10,8 +10,7 @@ from typing import Callable, Sequence, TextIO
 
 from .Agent import Agent
 from .Team import (
-    _load_team_config,
-    _run_team_prompt,
+    Team,
 )
 from .Tools import (
     BRIGHT_CYAN,
@@ -117,9 +116,9 @@ def _render_pop_animation(*, stream: TextIO | None = None, sleep: Callable[[floa
 
 def _run_pop_command(agent_file: str | None, team_file: str | None, prompt: str) -> int:
     if team_file is not None:
-        config = _load_team_config(team_file)
+        team = Team.from_file(team_file)
         _render_pop_animation()
-        asyncio.run(_run_team_prompt(config, prompt))
+        asyncio.run(team.run(prompt))
         return 0
 
     if agent_file is None:

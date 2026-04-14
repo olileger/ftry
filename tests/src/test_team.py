@@ -18,7 +18,6 @@ from tests.src.testsupport import (
     FakeHandoffBuilder,
     FakeMagenticBuilder,
     FakeSequentialBuilder,
-    FakeWorkflow,
     SAMPLE_TEAM_FILE,
     make_fake_agent_framework_modules,
     reset_fakes,
@@ -62,17 +61,23 @@ class TeamTests(unittest.TestCase):
             termination=team_module.TeamTerminationConfig(max_turns=max_turns),
         )
 
-    def test_pattern_and_termination_helpers_cover_aliases_and_errors(self) -> None:
-        self.assertEqual(team_module._normalize_team_pattern("Group_Chat"), "group-chat")
-        self.assertEqual(team_module._normalize_team_pattern("magentic-one"), "magentic")
-        with self.assertRaisesRegex(team_module.FtryCliError, "Unsupported team pattern `swarm`"):
-            team_module._normalize_team_pattern("swarm")
+    def _make_team(self, *agents: team_module.AgentConfig, **kwargs: object) -> team_module.Team:
+        return team_module.Team(self._make_team_config(*agents, **kwargs))
 
-        self.assertEqual(team_module._parse_team_termination(None), team_module.TeamTerminationConfig())
-        self.assertEqual(team_module._parse_team_termination({}), team_module.TeamTerminationConfig())
-        self.assertEqual(team_module._parse_team_termination({"max-turns": 4}), team_module.TeamTerminationConfig(max_turns=4))
+    def test_pattern_and_termination_helpers_cover_aliases_and_errors(self) -> None:
+        self.assertEqual(team_module.Team._normalize_pattern("Group_Chat"), "group-chat")
+        self.assertEqual(team_module.Team._normalize_pattern("magentic-one"), "magentic")
+        with self.assertRaisesRegex(team_module.FtryCliError, "Unsupported team pattern `swarm`"):
+            team_module.Team._normalize_pattern("swarm")
+
+        self.assertEqual(team_module.Team._parse_termination(None), team_module.TeamTerminationConfig())
+        self.assertEqual(team_module.Team._parse_termination({}), team_module.TeamTerminationConfig())
+        self.assertEqual(
+            team_module.Team._parse_termination({"max-turns": 4}),
+            team_module.TeamTerminationConfig(max_turns=4),
+        )
         with self.assertRaisesRegex(team_module.FtryCliError, "expected a positive integer"):
-            team_module._parse_team_termination({"max-turns": -1})
+            team_module.Team._parse_termination({"max-turns": -1})
 
     def test_render_team_instructions_and_analysis_helpers_include_roles(self) -> None:
         agent = self._make_agent_config(
@@ -81,7 +86,7 @@ class TeamTests(unittest.TestCase):
             instructions="Build a prompt.",
         )
         reviewer = self._make_agent_config(name="Reviewer", description=None, instructions="Review drafts.")
-        team = self._make_team_config(
+        team = self._make_team(
             agent,
             reviewer,
             name="Workshop",
@@ -89,17 +94,17 @@ class TeamTests(unittest.TestCase):
             instructions="Use {participants}.\n{roles}\n1. Draft.\n2. Review.",
         )
 
-        self.assertEqual(team_module._render_role_summary(agent), "Builds prompts. With care.")
-        rendered = team_module._render_team_instructions(team)
+        self.assertEqual(team_module.Team._render_role_summary(agent), "Builds prompts. With care.")
+        rendered = team._render_instructions()
         self.assertIn("Prompter, Reviewer", rendered)
         self.assertIn("- Reviewer: Review drafts.", rendered)
 
-        analysis_text = team_module._compose_pattern_analysis_text(team)
+        analysis_text = team._compose_pattern_analysis_text()
         self.assertIn("workshop", analysis_text)
-        self.assertTrue(team_module._contains_any(analysis_text, ("review",)))
-        self.assertTrue(team_module._has_numbered_steps(team.instructions))
+        self.assertTrue(team_module.Team._contains_any(analysis_text, ("review",)))
+        self.assertTrue(team_module.Team._has_numbered_steps(team.instructions))
 
-    def test_team_config_helpers_cover_string_file_refs_missing_defaults_and_fallbacks(self) -> None:
+    def test_team_loader_and_inference_helpers_cover_string_file_refs_missing_defaults_and_fallbacks(self) -> None:
         with TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
             agent_file = temp_path / "agent.yaml"
@@ -119,8 +124,8 @@ class TeamTests(unittest.TestCase):
             )
 
             with patch.dict(os.environ, {"OAI_API_KEY": "secret-key"}, clear=False):
-                loaded_agent = team_module._load_team_agent_config(f".\\{agent_file.name}", team_dir=temp_path)
-                inline_agent = team_module._load_team_agent_config(
+                loaded_agent = team_module.Team._load_agent_config(f".\\{agent_file.name}", team_dir=temp_path)
+                inline_agent = team_module.Team._load_agent_config(
                     {
                         "name": "Inline Agent",
                         "model": {
@@ -136,26 +141,21 @@ class TeamTests(unittest.TestCase):
             self.assertEqual(loaded_agent.name, "String Agent")
             self.assertEqual(inline_agent.name, "Inline Agent")
             with self.assertRaisesRegex(team_module.FtryCliError, "Team file not found"):
-                team_module._load_team_config(temp_path / "missing-team.yaml")
+                team_module.Team.from_file(temp_path / "missing-team.yaml")
 
-        neutral_agent = self._make_agent_config(
-            name="Helper",
-            description="Answers the request.",
-            instructions="Provide a useful answer.",
-        )
-        neutral_team = self._make_team_config(
-            neutral_agent,
+        neutral_team = self._make_team(
+            self._make_agent_config(name="Helper", description="Answers the request.", instructions="Provide a useful answer."),
             name="Generalists",
             description=None,
             instructions="Help with the request.",
         )
-        self.assertEqual(team_module._infer_team_pattern(neutral_team), "group-chat")
+        self.assertEqual(neutral_team._infer_pattern(), "group-chat")
 
         first_agent = FakeAgent(name="Alpha", instructions="Handle the task.", description="First specialist.")
         second_agent = FakeAgent(name="Beta", instructions="Continue the work.", description="Second specialist.")
-        self.assertEqual(team_module._select_handoff_start_agent([first_agent, second_agent]), first_agent)
+        self.assertEqual(team_module.Team._select_handoff_start_agent([first_agent, second_agent]), first_agent)
 
-    def test_load_team_config_validates_nominal_and_error_cases(self) -> None:
+    def test_team_from_file_validates_nominal_and_error_cases(self) -> None:
         with TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
             with patch.dict(os.environ, {"OAI_API_KEY": "secret-key"}, clear=False):
@@ -192,7 +192,7 @@ class TeamTests(unittest.TestCase):
                     encoding="utf-8",
                 )
 
-                team = team_module._load_team_config(team_file)
+                team = team_module.Team.from_file(team_file)
                 self.assertEqual(team.pattern, "group-chat")
                 self.assertEqual(team.agents[0].name, "Test Agent")
 
@@ -225,16 +225,16 @@ class TeamTests(unittest.TestCase):
                 )
 
                 with self.assertRaisesRegex(team_module.FtryCliError, "`file` references cannot be mixed with inline fields"):
-                    team_module._load_team_config(bad_team_file)
+                    team_module.Team.from_file(bad_team_file)
                 with self.assertRaisesRegex(team_module.FtryCliError, "Invalid or missing `agents` list"):
-                    team_module._load_team_config(empty_agents_file)
+                    team_module.Team.from_file(empty_agents_file)
 
             with patch.dict(os.environ, {"OAI_API_KEY": "secret-key"}, clear=False):
-                repo_sample = team_module._load_team_config(SAMPLE_TEAM_FILE)
+                repo_sample = team_module.Team.from_file(SAMPLE_TEAM_FILE)
             self.assertEqual(repo_sample.name, "Better Prompt team")
             self.assertEqual(len(repo_sample.agents), 3)
 
-    def test_load_team_config_resolves_project_relative_file_references(self) -> None:
+    def test_team_from_file_resolves_project_relative_file_references(self) -> None:
         with TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
             team_dir = temp_path / "samples" / "teams" / "better-prompt"
@@ -280,17 +280,17 @@ class TeamTests(unittest.TestCase):
             os.chdir(temp_path)
             try:
                 with patch.dict(os.environ, {"OAI_API_KEY": "secret-key"}, clear=False):
-                    config = team_module._load_team_config(r".\samples\teams\better-prompt\team.yaml")
+                    team = team_module.Team.from_file(r".\samples\teams\better-prompt\team.yaml")
             finally:
                 os.chdir(previous_cwd)
 
-        self.assertEqual(config.name, "Better Prompt team")
-        self.assertEqual([agent.name for agent in config.agents], ["Prompter", "Reviewer", "Runner"])
+        self.assertEqual(team.name, "Better Prompt team")
+        self.assertEqual([agent.name for agent in team.agents], ["Prompter", "Reviewer", "Runner"])
 
-    def test_create_team_controller_agent_applies_team_context(self) -> None:
+    def test_create_controller_agent_applies_team_context(self) -> None:
         reset_fakes()
         agent_config = self._make_agent_config(name="Runner", description="Executes prompts.", instructions="Run it.")
-        team = self._make_team_config(
+        team = self._make_team(
             agent_config,
             name="Better Prompt team",
             instructions="Use {participants}.\n{roles}",
@@ -298,53 +298,40 @@ class TeamTests(unittest.TestCase):
         )
 
         with patch.dict(sys.modules, make_fake_agent_framework_modules(), clear=False):
-            controller = team_module._create_team_controller_agent(
-                team,
-                instructions=team_module._render_team_instructions(team),
-            )
+            controller = team._create_controller_agent(instructions=team._render_instructions())
             self.assertIsInstance(controller, FakeAgent)
             self.assertEqual(controller.name, "Better-Prompt-team")
-            self.assertEqual(team_module._create_team_controller_agent(self._make_team_config(agent_config), instructions="ctx"), None)
+            self.assertEqual(self._make_team(agent_config)._create_controller_agent(instructions="ctx"), None)
 
     def test_infer_team_pattern_selects_expected_agent_framework_pattern(self) -> None:
         agent = self._make_agent_config()
 
         self.assertEqual(
-            team_module._infer_team_pattern(
-                team_module.TeamConfig(name="Triage", instructions="Route the request and handoff to specialists.", agents=(agent,))
-            ),
+            self._make_team(agent, name="Triage", instructions="Route the request and handoff to specialists.")._infer_pattern(),
             "handoff",
         )
         self.assertEqual(
-            team_module._infer_team_pattern(
-                team_module.TeamConfig(name="Research swarm", instructions="Work in parallel on independent aspects.", agents=(agent,))
-            ),
+            self._make_team(agent, name="Research swarm", instructions="Work in parallel on independent aspects.")._infer_pattern(),
             "concurrent",
         )
         self.assertEqual(
-            team_module._infer_team_pattern(
-                team_module.TeamConfig(
-                    name="Planner",
-                    instructions="Create a plan, replan if needed, and manage a complex task.",
-                    agents=(agent,),
-                )
-            ),
+            self._make_team(
+                agent,
+                name="Planner",
+                instructions="Create a plan, replan if needed, and manage a complex task.",
+            )._infer_pattern(),
             "magentic",
         )
         self.assertEqual(
-            team_module._infer_team_pattern(
-                team_module.TeamConfig(name="Workshop", instructions="Discuss ideas, review them, and iterate together.", agents=(agent,))
-            ),
+            self._make_team(agent, name="Workshop", instructions="Discuss ideas, review them, and iterate together.")._infer_pattern(),
             "group-chat",
         )
         self.assertEqual(
-            team_module._infer_team_pattern(
-                team_module.TeamConfig(
-                    name="Pipeline",
-                    instructions="First collect data, then write the answer, and finally polish it.",
-                    agents=(agent,),
-                )
-            ),
+            self._make_team(
+                agent,
+                name="Pipeline",
+                instructions="First collect data, then write the answer, and finally polish it.",
+            )._infer_pattern(),
             "sequential",
         )
 
@@ -359,16 +346,18 @@ class TeamTests(unittest.TestCase):
             patch.dict(os.environ, {"OAI_API_KEY": "secret-key"}, clear=False),
             patch.dict(sys.modules, make_fake_agent_framework_modules(), clear=False),
         ):
-            participants, author_name_map = team_module._build_team_participants(
-                self._make_team_config(duplicate_a, duplicate_b, router, instructions="Use {participants}."),
-                extra_instructions="Shared context",
-            )
+            participants, author_name_map = self._make_team(
+                duplicate_a,
+                duplicate_b,
+                router,
+                instructions="Use {participants}.",
+            )._build_participants(extra_instructions="Shared context")
             self.assertEqual([participant.name for participant in participants], ["Agent", "Agent-2", "Router"])
             self.assertEqual(author_name_map["Agent-2"], "Agent")
             self.assertIn("<TeamContext>", participants[0].instructions)
-            self.assertEqual(team_module._select_handoff_start_agent(participants).name, "Router")
+            self.assertEqual(team_module.Team._select_handoff_start_agent(participants).name, "Router")
             self.assertEqual(
-                team_module._count_assistant_messages(
+                team_module.Team._count_assistant_messages(
                     [
                         type("Message", (), {"role": "assistant"})(),
                         type("Message", (), {"role": "user"})(),
@@ -378,62 +367,64 @@ class TeamTests(unittest.TestCase):
                 2,
             )
 
-            team_module._build_team_workflow(
-                self._make_team_config(duplicate_a, specialist, pattern="sequential", name="Pipeline", instructions="First draft, then refine.")
-            )
+            self._make_team(
+                duplicate_a,
+                specialist,
+                pattern="sequential",
+                name="Pipeline",
+                instructions="First draft, then refine.",
+            )._build_workflow()
             self.assertTrue(FakeSequentialBuilder.last_kwargs["intermediate_outputs"])
 
-            team_module._build_team_workflow(
-                self._make_team_config(duplicate_a, specialist, pattern="concurrent", name="Swarm", instructions="Work in parallel.")
-            )
+            self._make_team(
+                duplicate_a,
+                specialist,
+                pattern="concurrent",
+                name="Swarm",
+                instructions="Work in parallel.",
+            )._build_workflow()
             self.assertTrue(FakeConcurrentBuilder.last_kwargs["intermediate_outputs"])
 
-            team_module._build_team_workflow(
-                self._make_team_config(
-                    router,
-                    specialist,
-                    pattern="handoff",
-                    name="Triage",
-                    instructions="Route and handoff.",
-                    max_turns=3,
-                )
-            )
+            self._make_team(
+                router,
+                specialist,
+                pattern="handoff",
+                name="Triage",
+                instructions="Route and handoff.",
+                max_turns=3,
+            )._build_workflow()
             self.assertEqual(FakeHandoffBuilder.last_start_agent.name, "Router")
             self.assertEqual(FakeHandoffBuilder.last_autonomous_kwargs["turn_limits"]["Router"], 3)
             self.assertTrue(callable(FakeHandoffBuilder.last_termination_condition))
 
-            team_module._build_team_workflow(
-                self._make_team_config(
-                    duplicate_a,
-                    specialist,
-                    pattern="group-chat",
-                    name="Workshop",
-                    instructions="Discuss together.",
-                    with_model=True,
-                    max_turns=5,
-                )
-            )
+            self._make_team(
+                duplicate_a,
+                specialist,
+                pattern="group-chat",
+                name="Workshop",
+                instructions="Discuss together.",
+                with_model=True,
+                max_turns=5,
+            )._build_workflow()
             self.assertEqual(FakeGroupChatBuilder.last_kwargs["max_rounds"], 5)
             self.assertIsInstance(FakeGroupChatBuilder.last_kwargs["orchestrator_agent"], FakeAgent)
 
-            team_module._build_team_workflow(
-                self._make_team_config(
-                    duplicate_a,
-                    specialist,
-                    pattern="magentic",
-                    name="Planner",
-                    instructions="Plan and replan a complex task.",
-                    with_model=True,
-                    max_turns=4,
-                )
-            )
+            self._make_team(
+                duplicate_a,
+                specialist,
+                pattern="magentic",
+                name="Planner",
+                instructions="Plan and replan a complex task.",
+                with_model=True,
+                max_turns=4,
+            )._build_workflow()
             self.assertEqual(FakeMagenticBuilder.last_kwargs["max_round_count"], 4)
             self.assertIsInstance(FakeMagenticBuilder.last_kwargs["manager_agent"], FakeAgent)
 
-    def test_run_team_prompt_handles_handoff_event_stream(self) -> None:
+    def test_run_handles_handoff_event_stream(self) -> None:
         reset_fakes()
         stderr = io.StringIO()
-        team = self._make_team_config(
+        team = self._make_team(
             self._make_agent_config(name="Router", description="Route the request.", instructions="Triage the task."),
             self._make_agent_config(name="Specialist", description="Handles the final answer.", instructions="Solve the task."),
             name="Handoff squad",
@@ -447,7 +438,7 @@ class TeamTests(unittest.TestCase):
             patch.dict(sys.modules, make_fake_agent_framework_modules(), clear=False),
             redirect_stderr(stderr),
         ):
-            output = asyncio.run(team_module._run_team_prompt(team, "Route this request"))
+            output = asyncio.run(team.run("Route this request"))
 
         self.assertEqual(output, "[Specialist]\nhandoff:Route this request")
         plain_stderr = strip_ansi(stderr.getvalue())
@@ -455,10 +446,10 @@ class TeamTests(unittest.TestCase):
         self.assertIn("Router --> Specialist | input:", plain_stderr)
         self.assertIn("TEAM Handoff squad <-- Specialist | final-output:", plain_stderr)
 
-    def test_run_team_prompt_prefers_last_agent_output_when_team_authors_final_message(self) -> None:
+    def test_run_prefers_last_agent_output_when_team_authors_final_message(self) -> None:
         reset_fakes()
         stderr = io.StringIO()
-        team = self._make_team_config(
+        team = self._make_team(
             self._make_agent_config(name="Prompter", instructions="Draft the prompt."),
             self._make_agent_config(name="Reviewer", instructions="Review the draft."),
             name="Better Prompt team",
@@ -472,7 +463,7 @@ class TeamTests(unittest.TestCase):
             patch.dict(sys.modules, make_fake_agent_framework_modules(), clear=False),
             redirect_stderr(stderr),
         ):
-            output = asyncio.run(team_module._run_team_prompt(team, "Ameliore ce prompt"))
+            output = asyncio.run(team.run("Ameliore ce prompt"))
 
         self.assertEqual(output, "[Better Prompt team]\ngroup-chat:Ameliore ce prompt")
         plain_stderr = strip_ansi(stderr.getvalue())
@@ -480,11 +471,11 @@ class TeamTests(unittest.TestCase):
         self.assertIn("Review feedback", final_output_log)
         self.assertNotIn("[Better Prompt team]\n\tgroup-chat:Ameliore ce prompt", final_output_log)
 
-    def test_run_team_prompt_logs_full_final_output_without_truncation(self) -> None:
+    def test_run_logs_full_final_output_without_truncation(self) -> None:
         reset_fakes()
         stderr = io.StringIO()
         long_prompt = "x" * 260
-        team = self._make_team_config(
+        team = self._make_team(
             self._make_agent_config(name="Researcher", instructions="Gather the facts."),
             self._make_agent_config(name="Writer", instructions="Write the final answer."),
             name="Pipeline team",
@@ -497,7 +488,7 @@ class TeamTests(unittest.TestCase):
             patch.dict(sys.modules, make_fake_agent_framework_modules(), clear=False),
             redirect_stderr(stderr),
         ):
-            output = asyncio.run(team_module._run_team_prompt(team, long_prompt))
+            output = asyncio.run(team.run(long_prompt))
 
         self.assertEqual(output, f"[Writer]\nsequential:{long_prompt}")
         plain_stderr = strip_ansi(stderr.getvalue())
@@ -558,12 +549,12 @@ class TeamTests(unittest.TestCase):
             last_visible_input="Prompt",
         )
 
-        team_module._handle_executor_invoked_event(type("Event", (), {"executor_id": None})(), request_driven_state, {})
+        team_module.Team._handle_executor_invoked_event(type("Event", (), {"executor_id": None})(), request_driven_state, {})
         self.assertIsNone(request_driven_state.active_executor)
 
         request_driven_state.expected_invoked_executor = "Reviewer"
         with patch.object(request_driven_state, "flush_buffer") as flush_buffer:
-            team_module._handle_executor_invoked_event(
+            team_module.Team._handle_executor_invoked_event(
                 type("Event", (), {"executor_id": "Prompter"})(),
                 request_driven_state,
                 {},
@@ -581,7 +572,7 @@ class TeamTests(unittest.TestCase):
             patch.object(direct_route_state, "flush_buffer", wraps=direct_route_state.flush_buffer) as flush_buffer,
             patch.object(direct_route_state, "trace_route") as trace_route,
         ):
-            team_module._handle_executor_invoked_event(
+            team_module.Team._handle_executor_invoked_event(
                 type("Event", (), {"executor_id": "Worker"})(),
                 direct_route_state,
                 {},
@@ -599,7 +590,7 @@ class TeamTests(unittest.TestCase):
         )
         empty_output_event = type("Event", (), {"data": object(), "executor_id": "Researcher"})()
         with patch("ftry.Team._summarize_payload", return_value=""):
-            team_module._handle_output_event(empty_output_event, output_state, {})
+            team_module.Team._handle_output_event(empty_output_event, output_state, {})
         self.assertIsNone(output_state.active_executor)
 
         first_output_event = type("Event", (), {"data": object(), "executor_id": "Researcher"})()
@@ -607,7 +598,7 @@ class TeamTests(unittest.TestCase):
             patch("ftry.Team._summarize_payload", return_value="Draft"),
             patch("ftry.Team._extract_trace_chunk", return_value="Chunk A"),
         ):
-            team_module._handle_output_event(first_output_event, output_state, {})
+            team_module.Team._handle_output_event(first_output_event, output_state, {})
         self.assertEqual(output_state.active_executor, "Researcher")
         self.assertEqual(output_state.buffered_outputs, ["Chunk A"])
 
@@ -617,7 +608,7 @@ class TeamTests(unittest.TestCase):
             patch("ftry.Team._extract_trace_chunk", return_value="Chunk B"),
             patch.object(output_state, "flush_buffer", wraps=output_state.flush_buffer) as flush_buffer,
         ):
-            team_module._handle_output_event(second_output_event, output_state, {})
+            team_module.Team._handle_output_event(second_output_event, output_state, {})
         flush_buffer.assert_called_once_with(next_executor="Writer")
         self.assertEqual(output_state.active_executor, "Writer")
         self.assertEqual(output_state.buffered_outputs, ["Chunk B"])

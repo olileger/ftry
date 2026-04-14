@@ -40,19 +40,18 @@ class CliTests(unittest.TestCase):
         render_animation.assert_called_once_with()
 
     def test_run_pop_command_dispatches_team_prompts(self) -> None:
-        config = object()
-        run_team_prompt = AsyncMock(return_value="done")
+        loaded_team = Mock()
+        loaded_team.run = AsyncMock(return_value="done")
 
         with (
-            patch("ftry.cli._load_team_config", return_value=config) as load_team_config,
-            patch("ftry.cli._run_team_prompt", run_team_prompt),
+            patch("ftry.cli.Team.from_file", return_value=loaded_team) as load_team,
             patch("ftry.cli._render_pop_animation") as render_animation,
         ):
             exit_code = cli._run_pop_command(None, "team.yaml", "Bonjour")
 
         self.assertEqual(exit_code, 0)
-        load_team_config.assert_called_once_with("team.yaml")
-        run_team_prompt.assert_awaited_once_with(config, "Bonjour")
+        load_team.assert_called_once_with("team.yaml")
+        loaded_team.run.assert_awaited_once_with("Bonjour")
         render_animation.assert_called_once_with()
 
     def test_main_reports_errors_and_direct_pop_requires_a_source(self) -> None:
