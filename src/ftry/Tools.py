@@ -31,6 +31,13 @@ USER_ROLE = "user"
 YAML_ROOT_FIELD = "root"
 AGENT_YAML_ROOT_FIELDS = frozenset({"name", "model", "prompt"})
 TEAM_YAML_ROOT_FIELDS = frozenset({"name", "agents", "prompt"})
+TEAM_PATTERN_INITIALS = {
+    "sequential": "S",
+    "concurrent": "C",
+    "handoff": "H",
+    "group-chat": "G",
+    "magentic": "M",
+}
 LINE_RESET_TOKEN = "[reset]"
 
 LINE_COLOR_TOKENS = {
@@ -213,8 +220,21 @@ def _build_agent_trace_colors(agent_names: Sequence[str]) -> dict[str, str]:
     }
 
 
-def _trace_team_label(team_name: str) -> str:
-    return _colorize(f"TEAM {team_name}", f"{BOLD}{BRIGHT_CYAN}")
+def _trace_team_label(team_name: str, *, pattern: str | None = None) -> str:
+    if pattern is None:
+        return _colorize(f"TEAM {team_name}", f"{BOLD}{BRIGHT_CYAN}")
+
+    pattern_initial = TEAM_PATTERN_INITIALS.get(pattern)
+    if pattern_initial is None:
+        return _colorize(f"TEAM {team_name}", f"{BOLD}{BRIGHT_CYAN}")
+
+    return "".join(
+        (
+            _colorize("TEAM", f"{BOLD}{BRIGHT_CYAN}"),
+            _colorize(f" ({pattern_initial})", f"{BOLD}{ORANGE}"),
+            _colorize(f" {team_name}", f"{BOLD}{BRIGHT_CYAN}"),
+        )
+    )
 
 
 def _trace_node_label(
@@ -222,9 +242,10 @@ def _trace_node_label(
     *,
     team_name: str,
     agent_trace_colors: Mapping[str, str],
+    team_pattern: str | None = None,
 ) -> str:
     if name == team_name:
-        return _trace_team_label(name)
+        return _trace_team_label(name, pattern=team_pattern)
     return _trace_agent_label(name, agent_trace_colors)
 
 
@@ -233,7 +254,13 @@ def _trace_agent_label(agent_name: str, agent_trace_colors: Mapping[str, str]) -
 
 
 def _trace_team_start(team_name: str, pattern: str, prompt: str) -> None:
-    _trace("%s | pattern: %s | %s:%s", _trace_team_label(team_name), pattern, TRACE_INPUT_FIELD, _trace_block(prompt))
+    _trace(
+        "%s | pattern: %s | %s:%s",
+        _trace_team_label(team_name, pattern=pattern),
+        pattern,
+        TRACE_INPUT_FIELD,
+        _trace_block(prompt),
+    )
 
 
 def _trace_route(
@@ -243,12 +270,23 @@ def _trace_route(
     *,
     team_name: str,
     agent_trace_colors: Mapping[str, str],
+    team_pattern: str | None = None,
 ) -> None:
     _trace(
         '%s %s %s | input:%s',
-        _trace_node_label(source_name, team_name=team_name, agent_trace_colors=agent_trace_colors),
+        _trace_node_label(
+            source_name,
+            team_name=team_name,
+            agent_trace_colors=agent_trace_colors,
+            team_pattern=team_pattern,
+        ),
         _colorize("-->", BRIGHT_YELLOW),
-        _trace_node_label(target_name, team_name=team_name, agent_trace_colors=agent_trace_colors),
+        _trace_node_label(
+            target_name,
+            team_name=team_name,
+            agent_trace_colors=agent_trace_colors,
+            team_pattern=team_pattern,
+        ),
         _trace_block(payload),
     )
 
@@ -260,13 +298,24 @@ def _trace_result(
     *,
     team_name: str,
     agent_trace_colors: Mapping[str, str],
+    team_pattern: str | None = None,
     field_name: str = TRACE_OUTPUT_FIELD,
 ) -> None:
     _trace(
         '%s %s %s | %s:%s',
-        _trace_node_label(receiver_name, team_name=team_name, agent_trace_colors=agent_trace_colors),
+        _trace_node_label(
+            receiver_name,
+            team_name=team_name,
+            agent_trace_colors=agent_trace_colors,
+            team_pattern=team_pattern,
+        ),
         _colorize("<--", BRIGHT_GREEN),
-        _trace_node_label(producer_name, team_name=team_name, agent_trace_colors=agent_trace_colors),
+        _trace_node_label(
+            producer_name,
+            team_name=team_name,
+            agent_trace_colors=agent_trace_colors,
+            team_pattern=team_pattern,
+        ),
         field_name,
         _trace_block(payload),
     )

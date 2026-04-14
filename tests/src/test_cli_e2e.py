@@ -368,7 +368,7 @@ class CliEndToEndTests(unittest.TestCase):
         self.assertNotIn("agent-prompter.yaml", plain_stderr)
         self.assertIn("TEAM Better Prompt team | team-type-inference-output:", plain_stderr)
         self.assertIn('"workflow_type": "magentic"', plain_stderr)
-        self.assertIn("TEAM Better Prompt team | pattern: magentic | input:", plain_stderr)
-        self.assertIn("TEAM Better Prompt team --> Prompter | input:", plain_stderr)
-        self.assertIn("TEAM Better Prompt team <-- Runner | final-output:", plain_stderr)
+        self.assertIn("TEAM (M) Better Prompt team | pattern: magentic | input:", plain_stderr)
+        self.assertIn("TEAM (M) Better Prompt team --> Prompter | input:", plain_stderr)
+        self.assertIn("TEAM (M) Better Prompt team <-- Runner | final-output:", plain_stderr)
 

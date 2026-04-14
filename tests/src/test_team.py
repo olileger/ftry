@@ -595,9 +595,9 @@ class TeamTests(unittest.TestCase):
 
         self.assertEqual(output, "[Specialist]\nhandoff:Route this request")
         plain_stderr = strip_ansi(stderr.getvalue())
-        self.assertIn("TEAM Handoff squad | pattern: handoff | input:", plain_stderr)
+        self.assertIn("TEAM (H) Handoff squad | pattern: handoff | input:", plain_stderr)
         self.assertIn("Router --> Specialist | input:", plain_stderr)
-        self.assertIn("TEAM Handoff squad <-- Specialist | final-output:", plain_stderr)
+        self.assertIn("TEAM (H) Handoff squad <-- Specialist | final-output:", plain_stderr)
 
     def test_run_prefers_last_agent_output_when_team_authors_final_message(self) -> None:
         reset_fakes()
@@ -620,7 +620,7 @@ class TeamTests(unittest.TestCase):
 
         self.assertEqual(output, "[Better Prompt team]\ngroup-chat:Ameliore ce prompt")
         plain_stderr = strip_ansi(stderr.getvalue())
-        final_output_log = plain_stderr.split("TEAM Better Prompt team <-- Reviewer | final-output:", maxsplit=1)[1]
+        final_output_log = plain_stderr.split("TEAM (G) Better Prompt team <-- Reviewer | final-output:", maxsplit=1)[1]
         self.assertIn("Review feedback", final_output_log)
         self.assertNotIn("[Better Prompt team]\n\tgroup-chat:Ameliore ce prompt", final_output_log)
 
@@ -645,7 +645,7 @@ class TeamTests(unittest.TestCase):
 
         self.assertEqual(output, f"[Writer]\nsequential:{long_prompt}")
         plain_stderr = strip_ansi(stderr.getvalue())
-        final_output_log = plain_stderr.split("TEAM Pipeline team <-- Writer | final-output:", maxsplit=1)[1]
+        final_output_log = plain_stderr.split("TEAM (S) Pipeline team <-- Writer | final-output:", maxsplit=1)[1]
         self.assertIn(f"[Writer]\n\tsequential:{long_prompt}", final_output_log)
         self.assertNotIn(f"sequential:{long_prompt[:237]}...", final_output_log)
 
@@ -671,6 +671,7 @@ class TeamTests(unittest.TestCase):
             "Full writer output",
             team_name="Pipeline team",
             agent_trace_colors={},
+            team_pattern="sequential",
             field_name="final-output",
         )
 
@@ -682,7 +683,7 @@ class TeamTests(unittest.TestCase):
         )
         with (
             patch("ftry.Team._collect_visible_messages", return_value=[]),
-            patch("ftry.Team._trace_team_label", return_value="TEAM Pipeline team"),
+            patch("ftry.Team._trace_team_label", return_value="TEAM (S) Pipeline team"),
             patch("ftry.Team._trace_block", return_value="\n\tRendered output"),
             patch("ftry.Team._trace") as trace_message,
         ):
@@ -690,7 +691,7 @@ class TeamTests(unittest.TestCase):
 
         trace_message.assert_called_once_with(
             "%s | final-output:%s",
-            "TEAM Pipeline team",
+            "TEAM (S) Pipeline team",
             "\n\tRendered output",
         )
 

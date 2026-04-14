@@ -189,6 +189,11 @@ class ToolsTests(unittest.TestCase):
         self.assertEqual(tools_module._sanitize_agent_name("   "), "agent")
         self.assertEqual(tools_module._trace_block("a\nb"), "\n\ta\n\tb")
         self.assertEqual(
+            __import__("re").sub(r"\x1b\[[0-9;]*m", "", tools_module._trace_team_label("Pipeline team", pattern="sequential")),
+            "TEAM (S) Pipeline team",
+        )
+        self.assertIn(tools_module.ORANGE, tools_module._trace_team_label("Pipeline team", pattern="sequential"))
+        self.assertEqual(
             tools_module._summarize_trace_text("# Type of problemCe sujet demande un poeme."),
             "# Type of problem\nCe sujet demande un poeme.",
         )

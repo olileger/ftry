@@ -119,6 +119,7 @@ class _TeamTraceState:
             aggregated_output,
             team_name=self.team_name,
             agent_trace_colors=self.agent_trace_colors,
+            team_pattern=self.pattern,
         )
         self.last_visible_input = aggregated_output
         self.last_agent_name = self.active_executor
@@ -135,6 +136,7 @@ class _TeamTraceState:
             _summarize_trace_text(self.last_visible_input),
             team_name=self.team_name,
             agent_trace_colors=self.agent_trace_colors,
+            team_pattern=self.pattern,
         )
 
     def trace_final_output(self, final_payload: Any, rendered_output: str, author_name_map: Mapping[str, str]) -> None:
@@ -148,6 +150,7 @@ class _TeamTraceState:
                     self.last_agent_full_output,
                     team_name=self.team_name,
                     agent_trace_colors=self.agent_trace_colors,
+                    team_pattern=self.pattern,
                     field_name="final-output",
                 )
                 return
@@ -158,6 +161,7 @@ class _TeamTraceState:
                 rendered_output,
                 team_name=self.team_name,
                 agent_trace_colors=self.agent_trace_colors,
+                team_pattern=self.pattern,
                 field_name="final-output",
             )
             return
@@ -169,11 +173,12 @@ class _TeamTraceState:
                 self.last_agent_full_output,
                 team_name=self.team_name,
                 agent_trace_colors=self.agent_trace_colors,
+                team_pattern=self.pattern,
                 field_name="final-output",
             )
             return
 
-        _trace("%s | final-output:%s", _trace_team_label(self.team_name), _trace_block(rendered_output))
+        _trace("%s | final-output:%s", _trace_team_label(self.team_name, pattern=self.pattern), _trace_block(rendered_output))
 
 
 class Team:
