@@ -13,8 +13,13 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
+import ftry.Team as team_module
 from ftry import cli
 from ftry.Tools import _detect_yaml_config_kind
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+SAMPLES_DIR = REPO_ROOT / "samples"
 
 
 def _strip_ansi(text: str) -> str:
@@ -563,6 +568,50 @@ class CliTests(unittest.TestCase):
         self.assertTrue(cli._contains_any(analysis_text, ("review",)))
         self.assertTrue(cli._has_numbered_steps(team.instructions))
 
+    def test_team_config_helpers_cover_string_file_refs_missing_defaults_and_fallbacks(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            agent_file = temp_path / "agent.yaml"
+            agent_file.write_text(
+                "\n".join(
+                    [
+                        "name: String Agent",
+                        "model:",
+                        "  name: gpt-4o",
+                        "  provider: openai",
+                        "  api-key: env:OAI_API_KEY",
+                        "prompt: |",
+                        "  Work from a string file reference.",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            with patch.dict(os.environ, {"OAI_API_KEY": "secret-key"}, clear=False):
+                loaded_agent = team_module._load_team_agent_config(f".\\{agent_file.name}", team_dir=temp_path)
+
+            self.assertEqual(loaded_agent.name, "String Agent")
+            self.assertEqual(team_module._parse_team_termination({}), cli.TeamTerminationConfig())
+            with self.assertRaisesRegex(cli.FtryCliError, "Team file not found"):
+                team_module._load_team_config(temp_path / "missing-team.yaml")
+
+        neutral_agent = self._make_agent_config(
+            name="Helper",
+            description="Answers the request.",
+            instructions="Provide a useful answer.",
+        )
+        neutral_team = self._make_team_config(
+            neutral_agent,
+            name="Generalists",
+            description=None,
+            instructions="Help with the request.",
+        )
+        self.assertEqual(team_module._infer_team_pattern(neutral_team), "group-chat")
+
+        first_agent = FakeAgent(name="Alpha", instructions="Handle the task.", description="First specialist.")
+        second_agent = FakeAgent(name="Beta", instructions="Continue the work.", description="Second specialist.")
+        self.assertEqual(team_module._select_handoff_start_agent([first_agent, second_agent]), first_agent)
+
     def test_load_agent_and_team_config_validate_nominal_and_error_cases(self) -> None:
         with TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
@@ -828,6 +877,123 @@ class CliTests(unittest.TestCase):
         self.assertIn(f"[Writer]\n\tsequential:{long_prompt}", final_output_log)
         self.assertNotIn(f"sequential:{long_prompt[:237]}...", final_output_log)
 
+    def test_team_trace_state_final_output_covers_no_visible_message_fallbacks(self) -> None:
+        state = team_module._TeamTraceState(
+            pattern="sequential",
+            team_name="Pipeline team",
+            agent_trace_colors={},
+            last_visible_input="Prompt",
+        )
+        state.last_agent_name = "Writer"
+        state.last_agent_full_output = "Full writer output"
+
+        with (
+            patch("ftry.Team._collect_visible_messages", return_value=[]),
+            patch("ftry.Team._trace_result") as trace_result,
+        ):
+            state.trace_final_output(object(), "Rendered output", {})
+
+        trace_result.assert_called_once_with(
+            "Pipeline team",
+            "Writer",
+            "Full writer output",
+            team_name="Pipeline team",
+            agent_trace_colors={},
+            field_name="final-output",
+        )
+
+        fallback_state = team_module._TeamTraceState(
+            pattern="sequential",
+            team_name="Pipeline team",
+            agent_trace_colors={},
+            last_visible_input="Prompt",
+        )
+        with (
+            patch("ftry.Team._collect_visible_messages", return_value=[]),
+            patch("ftry.Team._trace_team_label", return_value="TEAM Pipeline team"),
+            patch("ftry.Team._trace_block", return_value="\n\tRendered output"),
+            patch("ftry.Team._trace") as trace_message,
+        ):
+            fallback_state.trace_final_output(object(), "Rendered output", {})
+
+        trace_message.assert_called_once_with(
+            "%s | final-output:%s",
+            "TEAM Pipeline team",
+            "\n\tRendered output",
+        )
+
+    def test_team_event_helpers_cover_guard_paths_and_executor_transitions(self) -> None:
+        request_driven_state = team_module._TeamTraceState(
+            pattern="group-chat",
+            team_name="Workshop",
+            agent_trace_colors={},
+            last_visible_input="Prompt",
+        )
+
+        team_module._handle_executor_invoked_event(types.SimpleNamespace(executor_id=None), request_driven_state, {})
+        self.assertIsNone(request_driven_state.active_executor)
+
+        request_driven_state.expected_invoked_executor = "Reviewer"
+        with patch.object(request_driven_state, "flush_buffer") as flush_buffer:
+            team_module._handle_executor_invoked_event(
+                types.SimpleNamespace(executor_id="Prompter"),
+                request_driven_state,
+                {},
+            )
+        flush_buffer.assert_not_called()
+        self.assertEqual(request_driven_state.expected_invoked_executor, "Reviewer")
+
+        direct_route_state = team_module._TeamTraceState(
+            pattern="concurrent",
+            team_name="Swarm",
+            agent_trace_colors={},
+            last_visible_input="Prompt",
+        )
+        with (
+            patch.object(direct_route_state, "flush_buffer", wraps=direct_route_state.flush_buffer) as flush_buffer,
+            patch.object(direct_route_state, "trace_route") as trace_route,
+        ):
+            team_module._handle_executor_invoked_event(
+                types.SimpleNamespace(executor_id="Worker"),
+                direct_route_state,
+                {},
+            )
+
+        flush_buffer.assert_called_once_with(next_executor="Worker")
+        trace_route.assert_called_once_with("Swarm", "Worker")
+        self.assertEqual(direct_route_state.last_route_source, "Swarm")
+
+        output_state = team_module._TeamTraceState(
+            pattern="sequential",
+            team_name="Pipeline",
+            agent_trace_colors={},
+            last_visible_input="Prompt",
+        )
+        empty_output_event = types.SimpleNamespace(data=object(), executor_id="Researcher")
+        with patch("ftry.Team._summarize_payload", return_value=""):
+            team_module._handle_output_event(empty_output_event, output_state, {})
+        self.assertIsNone(output_state.active_executor)
+
+        first_output_event = types.SimpleNamespace(data=object(), executor_id="Researcher")
+        with (
+            patch("ftry.Team._summarize_payload", return_value="Draft"),
+            patch("ftry.Team._extract_trace_chunk", return_value="Chunk A"),
+        ):
+            team_module._handle_output_event(first_output_event, output_state, {})
+        self.assertEqual(output_state.active_executor, "Researcher")
+        self.assertEqual(output_state.buffered_outputs, ["Chunk A"])
+
+        second_output_event = types.SimpleNamespace(data=object(), executor_id="Writer")
+        with (
+            patch("ftry.Team._summarize_payload", return_value="Review"),
+            patch("ftry.Team._extract_trace_chunk", return_value="Chunk B"),
+            patch.object(output_state, "flush_buffer", wraps=output_state.flush_buffer) as flush_buffer,
+        ):
+            team_module._handle_output_event(second_output_event, output_state, {})
+        flush_buffer.assert_called_once_with(next_executor="Writer")
+        self.assertEqual(output_state.active_executor, "Writer")
+        self.assertEqual(output_state.buffered_outputs, ["Chunk B"])
+
     def test_main_reports_errors_and_direct_pop_requires_a_source(self) -> None:
         with self.assertRaisesRegex(cli.FtryCliError, "Either `-a/--agent-file` or `-t/--team-file` must be provided."):
             cli._run_pop_command(None, None, "Bonjour")
@@ -858,9 +1024,10 @@ class CliTests(unittest.TestCase):
 
     def test_pop_rejects_team_file_passed_as_agent_file(self) -> None:
         stderr = io.StringIO()
+        team_file = str(SAMPLES_DIR / "team.yaml")
 
         with redirect_stderr(stderr):
-            exit_code = cli.main(["pop", "-a", r".\samples\team.yaml", "-p", "Bonjour"])
+            exit_code = cli.main(["pop", "-a", team_file, "-p", "Bonjour"])
 
         self.assertEqual(exit_code, 1)
         self.assertIn("Invalid agent YAML", stderr.getvalue())
@@ -869,9 +1036,10 @@ class CliTests(unittest.TestCase):
 
     def test_pop_rejects_agent_file_passed_as_team_file(self) -> None:
         stderr = io.StringIO()
+        agent_file = str(SAMPLES_DIR / "poete.yaml")
 
         with redirect_stderr(stderr):
-            exit_code = cli.main(["pop", "-t", r".\samples\poete.yaml", "-p", "Bonjour"])
+            exit_code = cli.main(["pop", "-t", agent_file, "-p", "Bonjour"])
 
         self.assertEqual(exit_code, 1)
         self.assertIn("Invalid team YAML", stderr.getvalue())
