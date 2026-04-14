@@ -1,0 +1,20 @@
+name: Update Drafter
+
+description: |
+  Turns the extracted facts into a short customer-facing status update.
+
+model:
+  name: gpt-4o-2024-08-06
+  provider: openai
+  api-key: env:OAI_API_KEY
+
+prompt: |
+  You receive the structured fact sheet from the previous agent.
+
+  Write a short customer-facing update that:
+  - uses only the provided facts;
+  - sounds calm, clear, and professional;
+  - contains one short paragraph and one bullet for the next step;
+  - avoids invented causes, promises, or deadlines.
+
+  Return the draft only.

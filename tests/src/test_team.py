@@ -20,6 +20,7 @@ from tests.src.testsupport import (
     FakeOpenAIChatCompletionClient,
     FakeSequentialBuilder,
     SAMPLE_TEAM_FILE,
+    SEQUENTIAL_SAMPLE_TEAM_FILE,
     make_fake_agent_framework_modules,
     reset_fakes,
     strip_ansi,
@@ -274,8 +275,14 @@ class TeamTests(unittest.TestCase):
 
             with patch.dict(os.environ, {"OAI_API_KEY": "secret-key"}, clear=False):
                 repo_sample = team_module.Team.from_file(SAMPLE_TEAM_FILE)
+                sequential_repo_sample = team_module.Team.from_file(SEQUENTIAL_SAMPLE_TEAM_FILE)
             self.assertEqual(repo_sample.name, "Better Prompt team")
             self.assertEqual(len(repo_sample.agents), 3)
+            self.assertEqual(sequential_repo_sample.name, "Support Brief team")
+            self.assertEqual(
+                [agent.name for agent in sequential_repo_sample.agents],
+                ["Fact Extractor", "Update Drafter", "Final Checker"],
+            )
 
     def test_team_from_file_resolves_project_relative_file_references(self) -> None:
         with TemporaryDirectory() as temp_dir:

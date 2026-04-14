@@ -1,0 +1,23 @@
+name: Fact Extractor
+
+description: |
+  Extracts the relevant facts from raw support or incident notes before anyone drafts customer-facing text.
+
+model:
+  name: gpt-4o-2024-08-06
+  provider: openai
+  api-key: env:OAI_API_KEY
+
+prompt: |
+  You receive raw support or incident notes from the user.
+
+  Extract only the facts that are explicitly stated.
+  Do not infer missing causes, timelines, or commitments.
+  Keep the same language as the user input when possible.
+
+  Output with these exact sections:
+  - Issue
+  - Customer impact
+  - Actions completed
+  - Next step
+  - Open questions
