@@ -15,6 +15,7 @@ import ftry.Agent as agent_module
 from tests.src.testsupport import (
     FakeAgent,
     FakeOpenAIChatCompletionClient,
+    FakeResult,
     SAMPLE_AGENT_FILE,
     make_fake_agent_framework_modules,
     reset_fakes,
@@ -147,9 +148,84 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(FakeOpenAIChatCompletionClient.last_model, "gpt-4o")
         self.assertEqual(FakeOpenAIChatCompletionClient.last_api_key, "secret")
         self.assertEqual(FakeAgent.last_prompt, "Ecris un poeme sur la pluie")
+        self.assertEqual(len(FakeAgent.created_sessions), 1)
+        self.assertEqual(FakeAgent.last_options, {"response_format": agent_module.AGENT_TURN_RESPONSE_FORMAT})
         plain_stderr = strip_ansi(stderr.getvalue())
         self.assertIn("AGENT Poete | input:", plain_stderr)
         self.assertIn("AGENT Poete | final-output:", plain_stderr)
+
+    def test_run_loops_when_agent_awaits_user_input(self) -> None:
+        reset_fakes()
+        stderr = io.StringIO()
+        agent = agent_module.Agent(self._make_agent_config(name="Detective", instructions="Trouve la bonne personne."))
+        FakeAgent.queued_results = [
+            FakeResult(
+                "Structured agent turn",
+                value={"status": "await_user_input", "message": "Pense a une personnalite et dis-moi quand tu es pret."},
+            ),
+            FakeResult(
+                "Structured agent turn",
+                value={"status": "done", "message": "Je pense que c'est Marie Curie."},
+            ),
+        ]
+        prompts_seen: list[str] = []
+
+        def user_input_provider(agent_message: str) -> str:
+            prompts_seen.append(agent_message)
+            return "Je suis pret."
+
+        with (
+            patch.dict(sys.modules, make_fake_agent_framework_modules(), clear=False),
+            redirect_stderr(stderr),
+        ):
+            output = asyncio.run(agent.run("On joue a qui est-ce qui est ?", user_input_provider=user_input_provider))
+
+        self.assertEqual(output, "Je pense que c'est Marie Curie.")
+        self.assertEqual(prompts_seen, ["Pense a une personnalite et dis-moi quand tu es pret."])
+        self.assertEqual(len(FakeAgent.created_sessions), 1)
+        self.assertEqual(len(FakeAgent.run_calls), 2)
+        self.assertEqual(FakeAgent.run_calls[0]["kwargs"]["session"], FakeAgent.run_calls[1]["kwargs"]["session"])
+        self.assertEqual(FakeAgent.run_calls[1]["prompt"], "Je suis pret.")
+        plain_stderr = strip_ansi(stderr.getvalue())
+        self.assertIn("AGENT Detective | output [AWAIT USER INPUT]:", plain_stderr)
+        self.assertIn("AGENT Detective | final-output:", plain_stderr)
+        self.assertIn("AGENT Detective | input:\n\tJe suis pret.", plain_stderr)
+
+    def test_run_fails_when_agent_awaits_user_input_without_provider(self) -> None:
+        reset_fakes()
+        agent = agent_module.Agent(self._make_agent_config(name="Detective", instructions="Trouve la bonne personne."))
+        FakeAgent.queued_results = [
+            FakeResult(
+                "Structured agent turn",
+                value={"status": "await_user_input", "message": "Pense a une personnalite et dis-moi quand tu es pret."},
+            )
+        ]
+
+        with patch.dict(sys.modules, make_fake_agent_framework_modules(), clear=False):
+            with self.assertRaisesRegex(agent_module.FtryCliError, "awaiting user input"):
+                asyncio.run(agent.run("On joue a qui est-ce qui est ?"))
+
+    def test_parse_turn_response_rejects_missing_structured_payload(self) -> None:
+        with self.assertRaisesRegex(agent_module.FtryCliError, "missing the structured control payload"):
+            agent_module.Agent._parse_turn_response(FakeResult("Structured agent turn", value="not-a-mapping"))
+
+    def test_parse_turn_response_rejects_invalid_status(self) -> None:
+        with self.assertRaisesRegex(agent_module.FtryCliError, "invalid structured status"):
+            agent_module.Agent._parse_turn_response(
+                FakeResult(
+                    "Structured agent turn",
+                    value={"status": "continue", "message": "Je continue."},
+                )
+            )
+
+    def test_parse_turn_response_rejects_blank_message(self) -> None:
+        with self.assertRaisesRegex(agent_module.FtryCliError, "missing a non-empty structured message"):
+            agent_module.Agent._parse_turn_response(
+                FakeResult(
+                    "Structured agent turn",
+                    value={"status": "done", "message": "   "},
+                )
+            )
 
     def test_agent_from_file_loads_api_key_from_dotenv_file(self) -> None:
         with TemporaryDirectory() as temp_dir:

@@ -1,6 +1,6 @@
 # ftry
 
-![Coverage](https://img.shields.io/badge/coverage-100%25-brightgreen)
+![Coverage](https://img.shields.io/badge/coverage-99%25-brightgreen)
 
 Minimal CLI named `ftry`.
 
@@ -30,6 +30,7 @@ The `ftry line` command loads its output from `src\ftry\line.txt`. To change the
 
 The `ftry pop` command loads either an agent (`-a`) or a team of agents (`-t`) from a YAML file, sends the prompt passed with `-p`, then displays the model response.
 In an interactive terminal, it plays a slightly longer neon ASCII `POP` skateboard animation before the run starts, loading the static `POP` banner from `src\ftry\pop.txt`, reusing the skateboard style from `src\ftry\line.txt`, and leaving the final frame visible on screen.
+For direct agent runs (`ftry pop -a`), `ftry` now keeps the same Agent Framework session across turns and lets the model decide, via a structured turn status, whether the conversation is done or whether it is waiting for the next user input.
 
 Example:
 

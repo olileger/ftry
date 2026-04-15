@@ -50,6 +50,7 @@ POP_ANIMATION_CLEAR_LINE = "\x1b[2K"
 POP_ANIMATION_CURSOR_HIDE = "\x1b[?25l"
 POP_ANIMATION_CURSOR_SHOW = "\x1b[?25h"
 POP_ANIMATION_CURSOR_UP = "\x1b[1A"
+AGENT_INPUT_PROMPT = "You> "
 
 
 def _run_mock_command(command: str) -> int:
@@ -114,6 +115,27 @@ def _render_pop_animation(*, stream: TextIO | None = None, sleep: Callable[[floa
         target_stream.flush()
 
 
+def _read_agent_follow_up_input(
+    _: str,
+    *,
+    input_stream: TextIO | None = None,
+    output_stream: TextIO | None = None,
+) -> str:
+    target_input = sys.stdin if input_stream is None else input_stream
+    target_output = sys.stderr if output_stream is None else output_stream
+    if not getattr(target_input, "isatty", lambda: False)() or not getattr(target_output, "isatty", lambda: False)():
+        raise FtryCliError(
+            "Interactive agent conversations require an interactive terminal on stdin and stderr for `ftry pop -a`."
+        )
+
+    target_output.write(f"{AGENT_INPUT_PROMPT}")
+    target_output.flush()
+    response = target_input.readline()
+    if response == "":
+        raise FtryCliError("Interactive agent conversation ended before the next user input was provided.")
+    return response.rstrip("\r\n")
+
+
 def _run_pop_command(agent_file: str | None, team_file: str | None, prompt: str) -> int:
     if team_file is not None:
         team = Team.from_file(team_file)
@@ -125,7 +147,7 @@ def _run_pop_command(agent_file: str | None, team_file: str | None, prompt: str)
         raise FtryCliError("Either `-a/--agent-file` or `-t/--team-file` must be provided.")
     agent = Agent.from_file(agent_file)
     _render_pop_animation()
-    asyncio.run(agent.run(prompt))
+    asyncio.run(agent.run(prompt, user_input_provider=_read_agent_follow_up_input))
     return 0
 
 

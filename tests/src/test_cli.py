@@ -3,8 +3,7 @@ from __future__ import annotations
 import io
 import unittest
 from contextlib import redirect_stdout, redirect_stderr
-from unittest.mock import Mock
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from ftry import cli
 from tests.src.testsupport import FakeTtyStream, SAMPLE_AGENT_FILE, SAMPLE_TEAM_FILE, strip_ansi
@@ -36,7 +35,7 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         load_agent.assert_called_once_with("agent.yaml")
-        loaded_agent.run.assert_awaited_once_with("Bonjour")
+        loaded_agent.run.assert_awaited_once_with("Bonjour", user_input_provider=cli._read_agent_follow_up_input)
         render_animation.assert_called_once_with()
 
     def test_run_pop_command_dispatches_team_prompts(self) -> None:
@@ -127,6 +126,23 @@ class CliTests(unittest.TestCase):
         self.assertIn("matches an agent configuration (`name`, `model`, `prompt`)", stderr.getvalue())
         self.assertIn("does not define `agents` at the root", stderr.getvalue())
         self.assertIn("Use `-a/--agent-file` instead of `-t/--team-file`", stderr.getvalue())
+
+    def test_read_agent_follow_up_input_accepts_interactive_terminal(self) -> None:
+        response = cli._read_agent_follow_up_input(
+            "Question",
+            input_stream=FakeTtyStream("oui\n"),
+            output_stream=FakeTtyStream(),
+        )
+
+        self.assertEqual(response, "oui")
+
+    def test_read_agent_follow_up_input_rejects_non_interactive_terminal(self) -> None:
+        with self.assertRaisesRegex(cli.FtryCliError, "interactive terminal"):
+            cli._read_agent_follow_up_input(
+                "Question",
+                input_stream=io.StringIO("oui\n"),
+                output_stream=io.StringIO(),
+            )
 
 
 if __name__ == "__main__":

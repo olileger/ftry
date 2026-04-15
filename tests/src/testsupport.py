@@ -31,6 +31,9 @@ class FakeAgent:
     last_prompt: str | None = None
     last_options: object | None = None
     next_value: object | None = None
+    queued_results: list[FakeResult] = []
+    run_calls: list[dict[str, object]] = []
+    created_sessions: list[object] = []
 
     def __init__(
         self,
@@ -44,10 +47,31 @@ class FakeAgent:
         self.description = description
         self.require_per_service_call_history_persistence = require_per_service_call_history_persistence
 
-    async def run(self, prompt: str, *, options: object | None = None, **_: object) -> FakeResult:
+    def create_session(self) -> object:
+        session = object()
+        FakeAgent.created_sessions.append(session)
+        return session
+
+    async def run(self, prompt: str, *, options: object | None = None, **kwargs: object) -> FakeResult:
         FakeAgent.last_prompt = prompt
         FakeAgent.last_options = options
+        FakeAgent.run_calls.append(
+            {
+                "prompt": prompt,
+                "options": options,
+                "kwargs": dict(kwargs),
+            }
+        )
         if isinstance(options, dict) and "response_format" in options:
+            if FakeAgent.queued_results:
+                return FakeAgent.queued_results.pop(0)
+            response_format = options["response_format"]
+            schema_name = response_format.get("json_schema", {}).get("name") if isinstance(response_format, dict) else None
+            if schema_name == "agent_turn_response":
+                return FakeResult(
+                    "Structured agent turn",
+                    value={"status": "done", "message": "Poeme genere"},
+                )
             return FakeResult(
                 "Structured workflow inference",
                 value=FakeAgent.next_value
@@ -331,6 +355,9 @@ def reset_fakes() -> None:
     FakeAgent.last_prompt = None
     FakeAgent.last_options = None
     FakeAgent.next_value = None
+    FakeAgent.queued_results = []
+    FakeAgent.run_calls = []
+    FakeAgent.created_sessions = []
     FakeOpenAIChatCompletionClient.last_model = None
     FakeOpenAIChatCompletionClient.last_api_key = None
     FakeOpenAIChatCompletionClient.last_agent = None

@@ -43,8 +43,20 @@ def _write_stub_agent_framework(root: Path) -> None:
                     self.description = description
                     self.require_per_service_call_history_persistence = require_per_service_call_history_persistence
 
+                def create_session(self):
+                    return object()
+
                 async def run(self, prompt, *, options=None, **kwargs):
                     if isinstance(options, dict) and "response_format" in options:
+                        schema_name = options.get("response_format", {}).get("json_schema", {}).get("name")
+                        if schema_name == "agent_turn_response":
+                            return Result(
+                                f"{self.name}:{prompt}",
+                                value={
+                                    "status": "done",
+                                    "message": f"{self.name}:{prompt}",
+                                },
+                            )
                         return Result(
                             f"{self.name}:{prompt}",
                             value={
