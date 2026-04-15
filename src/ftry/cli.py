@@ -8,7 +8,7 @@ import sys
 import time
 from typing import Callable, Sequence, TextIO
 
-from .Agent import Agent
+from .StandaloneAgent import StandaloneAgent
 from .Team import (
     Team,
 )
@@ -145,7 +145,7 @@ def _run_pop_command(agent_file: str | None, team_file: str | None, prompt: str)
 
     if agent_file is None:
         raise FtryCliError("Either `-a/--agent-file` or `-t/--team-file` must be provided.")
-    agent = Agent.from_file(agent_file)
+    agent = StandaloneAgent.from_file(agent_file)
     _render_pop_animation()
     asyncio.run(agent.run(prompt, user_input_provider=_read_agent_follow_up_input))
     return 0

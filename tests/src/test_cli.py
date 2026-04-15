@@ -28,7 +28,7 @@ class CliTests(unittest.TestCase):
         loaded_agent.run = AsyncMock(return_value="done")
 
         with (
-            patch("ftry.cli.Agent.from_file", return_value=loaded_agent) as load_agent,
+            patch("ftry.cli.StandaloneAgent.from_file", return_value=loaded_agent) as load_agent,
             patch("ftry.cli._render_pop_animation") as render_animation,
         ):
             exit_code = cli._run_pop_command("agent.yaml", None, "Bonjour")

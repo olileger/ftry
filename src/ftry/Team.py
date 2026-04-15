@@ -6,7 +6,8 @@ from importlib.resources import files
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from .Agent import Agent, AgentConfig, AgentModelConfig
+from .Agent import AgentConfig, AgentModelConfig
+from .TeamAgent import TeamAgent
 from .Tools import (
     FtryCliError,
     _build_agent_trace_colors,
@@ -285,18 +286,18 @@ class Team:
     @classmethod
     def _load_agent_config(cls, raw_agent: Any, *, team_dir: Path | None) -> AgentConfig:
         if isinstance(raw_agent, str):
-            return Agent.from_file(raw_agent, base_dir=team_dir).config
+            return TeamAgent.from_file(raw_agent, base_dir=team_dir).config
 
         agent_config = _require_mapping(raw_agent, "agents[]", "team")
         if "file" in agent_config:
             if len(agent_config) != 1:
                 raise FtryCliError("Invalid `agents[]` entry in team YAML: `file` references cannot be mixed with inline fields.")
-            return Agent.from_file(
+            return TeamAgent.from_file(
                 _require_non_empty_string(agent_config.get("file"), "agents[].file", "team"),
                 base_dir=team_dir,
             ).config
 
-        return Agent.from_mapping(agent_config, config_kind="team agent").config
+        return TeamAgent.from_mapping(agent_config, config_kind="team agent").config
 
     @staticmethod
     def _parse_termination(raw_termination: Any) -> TeamTerminationConfig:
@@ -444,7 +445,7 @@ class Team:
         if self.model is None:
             return None
 
-        return Agent(
+        return TeamAgent(
             AgentConfig(
                 name=self.name,
                 description=self.description,
@@ -490,7 +491,7 @@ class Team:
             used_names.add(unique_name)
             author_name_map[unique_name] = agent.name
             participants.append(
-                Agent(agent).create_participant(
+                TeamAgent(agent).create_participant(
                     extra_instructions=extra_instructions,
                     name_override=unique_name,
                     require_per_service_call_history_persistence=require_per_service_call_history_persistence,
@@ -517,7 +518,9 @@ class Team:
         inject_team_context = pattern in TEAM_CONTEXT_PATTERNS or self.model is None
         participants, author_name_map = self._build_participants(
             extra_instructions=rendered_instructions if inject_team_context else None,
-            require_per_service_call_history_persistence=pattern == "handoff",
+            # Handoff injects and filters internal tool calls; persisting around each
+            # service call can leak those mechanics into later turns.
+            require_per_service_call_history_persistence=False,
         )
         SequentialBuilder, ConcurrentBuilder, HandoffBuilder, GroupChatBuilder, MagenticBuilder = (
             self._load_orchestration_builders()

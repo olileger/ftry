@@ -541,7 +541,7 @@ class TeamTests(unittest.TestCase):
             self.assertTrue(callable(FakeHandoffBuilder.last_termination_condition))
             self.assertTrue(
                 all(
-                    participant.require_per_service_call_history_persistence
+                    not participant.require_per_service_call_history_persistence
                     for participant in FakeHandoffBuilder.last_autonomous_kwargs["agents"]
                 )
             )
