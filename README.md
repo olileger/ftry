@@ -63,6 +63,15 @@ Magentic example:
 ftry pop -t .\samples\teams\mag-launch-planning-team\team.yaml -p "We are launching a weekly digest feature for project managers next month. Build a lightweight rollout brief with the goal, main risks, and next action."
 ```
 
+Human-in-the-Loop team examples:
+
+```powershell
+ftry pop -t .\samples\teams\hil-seq-support-brief-team\team.yaml -p "Customer cannot log in since yesterday. We restarted the auth service. We are still checking the root cause."
+ftry pop -t .\samples\teams\hil-han-support-routing-team\team.yaml -p "I cannot access the workspace after the subscription change and I need a customer-ready update."
+ftry pop -t .\samples\teams\hil-grp-feature-debate-team\team.yaml -p "We want to add GenAI to our chatbot."
+ftry pop -t .\samples\teams\hil-mag-launch-planning-team\team.yaml -p "We want to launch an AI weekly digest for team leads next month. Build a lightweight rollout brief."
+```
+
 ## Local installation
 
 Prerequisites:

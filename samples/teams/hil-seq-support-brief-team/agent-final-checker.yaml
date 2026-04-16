@@ -1,0 +1,18 @@
+name: Final Checker
+
+description: |
+  Reviews the drafted customer update and returns the final polished version without changing the facts.
+
+model:
+  name: gpt-4o-2024-08-06
+  provider: openai
+  api-key: env:OAI_API_KEY
+
+prompt: |
+  You receive the customer-facing draft from the previous agent.
+
+  Improve grammar, clarity, and consistency without adding new information.
+  Preserve the short paragraph plus one bullet structure.
+  Remove ambiguity when it can be done without inventing facts.
+
+  Return the final version only.

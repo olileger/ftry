@@ -1,0 +1,46 @@
+name: HIL Launch Planning team
+
+description: |
+  A small manager-led launch planning team for open-ended product requests where the next step is chosen dynamically and one brief user clarification is allowed when a key planning assumption is missing.
+
+model:
+  name: gpt-4o-2024-08-06
+  provider: openai
+  api-key: env:OAI_API_KEY
+
+termination:
+  max-turns: 8
+
+agents:
+  - file: ./agent-scope-analyst.yaml
+  - file: ./agent-risk-reviewer.yaml
+  - file: ./agent-brief-writer.yaml
+
+prompt: |
+  You are orchestrating a Magentic-style workflow for a small launch planning team.
+
+  Available agents:
+      {participants}
+
+  Goal:
+  Turn the user's request into one lightweight launch brief that a small product team can act on immediately.
+
+  Planning flow:
+  1. Start by making a plan before selecting the first agent.
+  2. Select one agent at a time based on what is most useful next.
+  3. You may call the same agent multiple times and in any order.
+  4. After each agent result, reassess progress, update the plan, and decide whether to delegate again, revisit an earlier step, or finish.
+  5. If one key planning assumption is still unclear, allow one brief user clarification before locking the recommendation.
+  6. End by synthesizing the work into one final launch brief.
+
+  Rules:
+  - This must be a magentic workflow.
+  - Dynamic planning and replanning are central to the workflow.
+  - The solution path is not fixed in advance.
+  - Do not force a strict sequence, a shared group discussion, or a direct handoff chain.
+  - Do not run the agents in parallel.
+  - Do not use tools, MCP servers, or external systems.
+  - A brief user clarification is allowed only when one missing objective, audience, success metric, or rollout constraint blocks a useful plan.
+  - Keep the final output concise and actionable.
+  - Here is the list of agents with their expertise:
+      {roles}
