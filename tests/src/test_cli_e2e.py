@@ -24,6 +24,15 @@ def _write_stub_agent_framework(root: Path) -> None:
     (package_dir / "openai.py").write_text(
         textwrap.dedent(
             """
+            def response_handler(func=None, **kwargs):
+                def decorator(inner):
+                    return inner
+
+                if func is not None and callable(func) and not kwargs:
+                    return decorator(func)
+                return decorator
+
+
             class Result:
                 def __init__(self, text, value=None):
                     self.text = text
@@ -60,8 +69,13 @@ def _write_stub_agent_framework(root: Path) -> None:
                         return Result(
                             f"{self.name}:{prompt}",
                             value={
-                                "workflow_type": "magentic",
+                                "workflow_type": "concurrent" if "concurrent workflow" in prompt.lower() else "magentic",
                                 "reason": "Stubbed workflow inference result.",
+                                "human_in_the_loop": {
+                                    "enabled": False,
+                                    "reason": "Stubbed workflows do not need user input in this end-to-end test.",
+                                    "agent_names": [],
+                                },
                             },
                         )
                     return Result(f"{self.name}:{prompt}")
@@ -240,6 +254,10 @@ def _write_stub_agent_framework(root: Path) -> None:
                 def __init__(self, **kwargs):
                     self.kwargs = kwargs
 
+                def with_request_info(self, **kwargs):
+                    self.kwargs["request_info"] = kwargs
+                    return self
+
                 def build(self):
                     return Workflow("sequential", **self.kwargs)
 
@@ -256,6 +274,10 @@ def _write_stub_agent_framework(root: Path) -> None:
                 def __init__(self, **kwargs):
                     self.kwargs = kwargs
 
+                def with_request_info(self, **kwargs):
+                    self.kwargs["request_info"] = kwargs
+                    return self
+
                 def build(self):
                     return Workflow("group-chat", **self.kwargs)
 
@@ -270,6 +292,10 @@ def _write_stub_agent_framework(root: Path) -> None:
 
                 def with_autonomous_mode(self, **kwargs):
                     self.kwargs["autonomous_mode"] = kwargs
+                    return self
+
+                def with_request_info(self, **kwargs):
+                    self.kwargs["request_info"] = kwargs
                     return self
 
                 def with_termination_condition(self, termination_condition):
@@ -363,24 +389,25 @@ class CliEndToEndTests(unittest.TestCase):
         result = self._run_cli(
             "pop",
             "-t",
-            r".\samples\teams\better-prompt\team.yaml",
+            r".\samples\teams\con-release-readiness-team\team.yaml",
             "-p",
-            "Ameliore ce prompt",
+            "Build a launch update",
             with_agent_framework=True,
         )
 
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         self.assertEqual(result.stdout.strip(), "")
         plain_stderr = _strip_ansi(result.stderr)
-        self.assertIn("TEAM Better Prompt team | team-type-inference-prompt:", plain_stderr)
-        self.assertIn("Team prompt:", plain_stderr)
-        self.assertIn("You are managing a team of agents to build the best possible prompt.", plain_stderr)
+        self.assertIn("TEAM Release Readiness team | team-type-inference-prompt:", plain_stderr)
+        self.assertIn("Current user request: Build a launch update", plain_stderr)
+        self.assertIn("Agents:", plain_stderr)
+        self.assertIn("- id: Value-Analyst | name: Value Analyst | role:", plain_stderr)
         self.assertIn("...", plain_stderr)
-        self.assertNotIn("Prompter, Reviewer, Runner", plain_stderr)
-        self.assertNotIn("agent-prompter.yaml", plain_stderr)
-        self.assertIn("TEAM Better Prompt team | team-type-inference-output:", plain_stderr)
-        self.assertIn('"workflow_type": "magentic"', plain_stderr)
-        self.assertIn("TEAM (M) Better Prompt team | pattern: magentic | input:", plain_stderr)
-        self.assertIn("TEAM (M) Better Prompt team --> Prompter | input:", plain_stderr)
-        self.assertIn("TEAM (M) Better Prompt team <-- Runner | final-output:", plain_stderr)
+        self.assertNotIn("Value Analyst, Risk Reviewer, Launch Note Drafter", plain_stderr)
+        self.assertNotIn("agent-value-analyst.yaml", plain_stderr)
+        self.assertIn("TEAM Release Readiness team | team-type-inference-output:", plain_stderr)
+        self.assertIn('"workflow_type": "concurrent"', plain_stderr)
+        self.assertIn("TEAM (C) Release Readiness team | pattern: concurrent | input:", plain_stderr)
+        self.assertIn("TEAM (C) Release Readiness team --> Value Analyst | input:", plain_stderr)
+        self.assertIn("TEAM (C) Release Readiness team <-- Launch Note Drafter | final-output:", plain_stderr)
 

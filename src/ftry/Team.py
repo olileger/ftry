@@ -4,10 +4,10 @@ import json
 from dataclasses import dataclass, field
 from importlib.resources import files
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from .Agent import AgentConfig, AgentModelConfig
-from .TeamAgent import TeamAgent
+from .TeamAgent import TeamAgent, TeamAgentUserInputRequest
 from .Tools import (
     FtryCliError,
     _build_agent_trace_colors,
@@ -64,6 +64,7 @@ TEAM_CONTEXT_PATTERNS = frozenset({"sequential", "concurrent", "handoff"})
 TEAM_SHARED_RESULT_PATTERNS = frozenset({"group-chat", "concurrent", "magentic"})
 TEAM_REQUEST_DRIVEN_PATTERNS = frozenset({"group-chat", "handoff"})
 TEAM_DIRECT_ROUTE_PATTERNS = frozenset({"concurrent", "magentic"})
+UserInputProvider = Callable[[str], str]
 
 
 @dataclass(frozen=True)
@@ -75,6 +76,22 @@ class TeamTerminationConfig:
 class _TeamPatternInference:
     pattern: str
     reason: str
+
+
+@dataclass(frozen=True)
+class _PlannedTeamParticipant:
+    internal_name: str
+    display_name: str
+    config: AgentConfig
+    role_summary: str
+
+
+@dataclass(frozen=True)
+class _PendingTeamRequest:
+    request_id: str
+    prompt: str
+    build_response: Callable[[str], Any]
+    skip_trace_when_blank: bool = False
 
 
 @dataclass(frozen=True)
@@ -228,8 +245,8 @@ class Team:
     def termination(self) -> TeamTerminationConfig:
         return self._config.termination
 
-    async def run(self, prompt: str) -> str:
-        pattern, workflow, author_name_map = await self._build_workflow()
+    async def run(self, prompt: str, *, user_input_provider: UserInputProvider | None = None) -> str:
+        pattern, workflow, author_name_map = await self._build_workflow(prompt)
         state = _TeamTraceState(
             pattern=pattern,
             team_name=self.name,
@@ -239,22 +256,24 @@ class Team:
 
         _trace_team_start(state.team_name, state.pattern, prompt)
 
-        stream = workflow.run(prompt, stream=True)
-        async for event in stream:
-            if event.type == "group_chat":
-                self._handle_group_chat_event(event, state, author_name_map)
-                continue
+        pending_responses: dict[str, Any] | None = None
+        first_run = True
 
-            if event.type == "handoff_sent":
-                self._handle_handoff_event(event, state, author_name_map)
-                continue
+        while True:
+            if first_run:
+                stream = workflow.run(prompt, stream=True)
+                first_run = False
+            elif pending_responses is not None:
+                stream = workflow.run(stream=True, responses=pending_responses)
+            else:
+                break
 
-            if event.type == "executor_invoked":
-                self._handle_executor_invoked_event(event, state, author_name_map)
-                continue
-
-            if event.type == "output":
-                self._handle_output_event(event, state, author_name_map)
+            pending_responses = await self._process_workflow_stream(
+                stream,
+                state=state,
+                author_name_map=author_name_map,
+                user_input_provider=user_input_provider,
+            )
 
         state.flush_buffer()
         rendered_output = _format_final_team_output(state.final_payload, author_name_map=author_name_map)
@@ -321,11 +340,25 @@ class Team:
         roles = "\n".join(f"- {agent.name}: {self._render_role_summary(agent)}" for agent in self.agents)
         return self.instructions.replace("{participants}", participants).replace("{roles}", roles)
 
-    def _render_pattern_inference_input(self, *, rendered_instructions: str) -> str:
+    def _render_pattern_inference_input(
+        self,
+        *,
+        current_input: str,
+        rendered_instructions: str,
+        participant_plans: Sequence[_PlannedTeamParticipant],
+    ) -> str:
+        agent_lines = [
+            f"- id: {plan.internal_name} | name: {plan.display_name} | role: {plan.role_summary}"
+            for plan in participant_plans
+        ]
         return "\n".join(
             [
                 f"Team name: {self.name}",
                 f"Team description: {self.description or '(none)'}",
+                f"Current user request: {current_input}",
+                "",
+                "Agents:",
+                *agent_lines,
                 "",
                 "Team prompt:",
                 rendered_instructions,
@@ -340,6 +373,130 @@ class Team:
     def _contains_any(text: str, hints: Sequence[str]) -> bool:
         return any(hint in text for hint in hints)
 
+    @staticmethod
+    def _load_handoff_request_type() -> Any:
+        try:
+            from agent_framework.orchestrations import HandoffAgentUserRequest
+        except ImportError as exc:  # pragma: no cover - covered by CLI error path
+            raise FtryCliError(
+                "Microsoft Agent Framework request/response support is required for `ftry pop -t`. "
+                "Reinstall the project with `python -m pip install -e .`."
+            ) from exc
+
+        return HandoffAgentUserRequest
+
+    @staticmethod
+    def _extract_request_prompt(source: Any) -> str:
+        if source is None:
+            raise FtryCliError("Team request_info did not include a visible prompt for the user.")
+
+        text = getattr(source, "text", None)
+        if isinstance(text, str) and text.strip():
+            return text.strip()
+
+        messages = source if isinstance(source, Sequence) and not isinstance(source, (str, bytes)) else getattr(source, "messages", None)
+        if isinstance(messages, Sequence):
+            visible_messages = [
+                message_text.strip()
+                for message in messages
+                if isinstance((message_text := getattr(message, "text", None)), str) and message_text.strip()
+            ]
+            if visible_messages:
+                return visible_messages[-1]
+
+        raise FtryCliError("Team request_info did not include a visible prompt for the user.")
+
+    @staticmethod
+    def _trace_request_info(prompt: str, state: _TeamTraceState) -> None:
+        _trace(
+            "%s | request-info:%s",
+            _trace_team_label(state.team_name, pattern=state.pattern),
+            _trace_block(prompt),
+        )
+
+    @classmethod
+    def _create_pending_request(cls, event: Any, *, state: _TeamTraceState) -> _PendingTeamRequest:
+        HandoffAgentUserRequest = cls._load_handoff_request_type()
+        request_id = getattr(event, "request_id", None)
+        if not isinstance(request_id, str) or not request_id:
+            raise FtryCliError("Team request_info event is missing a valid request identifier.")
+
+        data = getattr(event, "data", None)
+        state.flush_buffer()
+
+        if isinstance(data, TeamAgentUserInputRequest):
+            prompt = data.prompt
+            state.last_visible_input = prompt
+            cls._trace_request_info(prompt, state)
+            return _PendingTeamRequest(
+                request_id=request_id,
+                prompt=prompt,
+                build_response=lambda user_input: user_input,
+            )
+
+        if isinstance(data, HandoffAgentUserRequest):
+            prompt = cls._extract_request_prompt(getattr(data, "agent_response", None))
+            state.last_visible_input = prompt
+            cls._trace_request_info(prompt, state)
+            return _PendingTeamRequest(
+                request_id=request_id,
+                prompt=prompt,
+                build_response=lambda user_input, request=data: request.create_response(user_input),
+            )
+
+        raise FtryCliError(
+            "Team request_info emitted an unsupported payload. "
+            "Only Human in the Loop request/response is supported; tool approval is not supported."
+        )
+
+    async def _process_workflow_stream(
+        self,
+        stream: Any,
+        *,
+        state: _TeamTraceState,
+        author_name_map: Mapping[str, str],
+        user_input_provider: UserInputProvider | None,
+    ) -> dict[str, Any] | None:
+        pending_requests: list[_PendingTeamRequest] = []
+
+        async for event in stream:
+            if event.type == "group_chat":
+                self._handle_group_chat_event(event, state, author_name_map)
+                continue
+
+            if event.type == "handoff_sent":
+                self._handle_handoff_event(event, state, author_name_map)
+                continue
+
+            if event.type == "executor_invoked":
+                self._handle_executor_invoked_event(event, state, author_name_map)
+                continue
+
+            if event.type == "request_info":
+                pending_requests.append(self._create_pending_request(event, state=state))
+                continue
+
+            if event.type == "output":
+                self._handle_output_event(event, state, author_name_map)
+
+        if not pending_requests:
+            return None
+
+        if user_input_provider is None:
+            raise FtryCliError(
+                f"Team `{self.name}` is awaiting user input, but no interactive user input provider is configured."
+            )
+
+        responses: dict[str, Any] = {}
+        for request in pending_requests:
+            user_input = user_input_provider(request.prompt)
+            if not (request.skip_trace_when_blank and not user_input.strip()):
+                _trace_team_start(state.team_name, state.pattern, user_input)
+                state.last_visible_input = user_input
+            responses[request.request_id] = request.build_response(user_input)
+
+        return responses
+
     def _resolve_pattern_inference_model(self) -> AgentModelConfig:
         return self.model or self.agents[0].model
 
@@ -351,14 +508,19 @@ class Team:
             return str(value)
 
     @staticmethod
-    def _preview_pattern_inference_prompt(prompt: str, *, max_lines: int = 6) -> str:
+    def _preview_pattern_inference_prompt(prompt: str, *, max_lines: int = 9) -> str:
         lines = prompt.splitlines()
         if len(lines) <= max_lines:
             return prompt
         return "\n".join([*lines[:max_lines], "..."])
 
     @classmethod
-    def _parse_pattern_inference(cls, value: Any) -> _TeamPatternInference:
+    def _parse_pattern_inference(
+        cls,
+        value: Any,
+        *,
+        valid_agent_names: Sequence[str] = (),
+    ) -> _TeamPatternInference:
         if not isinstance(value, Mapping):
             raise FtryCliError("Team workflow inference did not return a JSON object.")
 
@@ -375,13 +537,18 @@ class Team:
         reason = value.get("reason")
         if not isinstance(reason, str) or not reason.strip():
             raise FtryCliError("Team workflow inference did not return a valid `reason`.")
-
         return _TeamPatternInference(
             pattern=normalized_workflow_type,
             reason=reason.strip(),
         )
 
-    async def _infer_pattern(self, *, rendered_instructions: str) -> str:
+    async def _infer_pattern(
+        self,
+        *,
+        current_input: str,
+        rendered_instructions: str,
+        participant_plans: Sequence[_PlannedTeamParticipant],
+    ) -> _TeamPatternInference:
         model = self._resolve_pattern_inference_model()
         if model.provider.lower() != "openai":
             raise FtryCliError(
@@ -404,7 +571,11 @@ class Team:
             description="Selects the most appropriate Microsoft Agent Framework workflow type.",
             instructions=self._load_team_type_inference_prompt_template(),
         )
-        inference_prompt = self._render_pattern_inference_input(rendered_instructions=rendered_instructions)
+        inference_prompt = self._render_pattern_inference_input(
+            current_input=current_input,
+            rendered_instructions=rendered_instructions,
+            participant_plans=participant_plans,
+        )
         _trace(
             "%s | team-type-inference-prompt:%s",
             _trace_team_label(self.name),
@@ -420,8 +591,10 @@ class Team:
             _trace_team_label(self.name),
             _trace_block(self._format_pattern_inference_output(raw_inference_output)),
         )
-        inference = self._parse_pattern_inference(raw_inference_output)
-        return inference.pattern
+        return self._parse_pattern_inference(
+            raw_inference_output,
+            valid_agent_names=[plan.internal_name for plan in participant_plans],
+        )
 
     @staticmethod
     def _load_orchestration_builders() -> tuple[Any, Any, Any, Any, Any]:
@@ -471,14 +644,8 @@ class Team:
     def _count_assistant_messages(conversation: list[Any]) -> int:
         return sum(1 for message in conversation if getattr(message, "role", None) == "assistant")
 
-    def _build_participants(
-        self,
-        *,
-        extra_instructions: str | None,
-        require_per_service_call_history_persistence: bool = False,
-    ) -> tuple[list[Any], dict[str, str]]:
-        participants: list[Any] = []
-        author_name_map: dict[str, str] = {}
+    def _build_participant_plans(self) -> tuple[_PlannedTeamParticipant, ...]:
+        participant_plans: list[_PlannedTeamParticipant] = []
         used_names: set[str] = set()
 
         for index, agent in enumerate(self.agents, start=1):
@@ -489,35 +656,73 @@ class Team:
                 unique_name = f"{candidate_name}-{suffix}"
                 suffix += 1
             used_names.add(unique_name)
-            author_name_map[unique_name] = agent.name
+            participant_plans.append(
+                _PlannedTeamParticipant(
+                    internal_name=unique_name,
+                    display_name=agent.name,
+                    config=agent,
+                    role_summary=self._render_role_summary(agent),
+                )
+            )
+
+        return tuple(participant_plans)
+
+    def _build_participants(
+        self,
+        *,
+        participant_plans: Sequence[_PlannedTeamParticipant],
+        extra_instructions: str | None,
+        use_managed_participants: bool,
+        require_per_service_call_history_persistence: bool = False,
+    ) -> tuple[list[Any], dict[str, str]]:
+        participants: list[Any] = []
+        author_name_map: dict[str, str] = {}
+
+        for plan in participant_plans:
+            author_name_map[plan.internal_name] = plan.display_name
+            team_agent = TeamAgent(plan.config)
+            participant_factory = (
+                team_agent.create_managed_participant if use_managed_participants else team_agent.create_participant
+            )
             participants.append(
-                TeamAgent(agent).create_participant(
+                participant_factory(
                     extra_instructions=extra_instructions,
-                    name_override=unique_name,
+                    name_override=plan.internal_name,
                     require_per_service_call_history_persistence=require_per_service_call_history_persistence,
                 )
             )
 
         return participants, author_name_map
 
-    def _build_handoff_workflow(self, *, participants: Sequence[Any], handoff_builder_type: Any) -> Any:
+    def _build_handoff_workflow(
+        self,
+        *,
+        participants: Sequence[Any],
+        handoff_builder_type: Any,
+    ) -> Any:
         handoff_builder = handoff_builder_type(name=self.name, participants=participants, description=self.description)
         handoff_builder = handoff_builder.with_start_agent(self._select_handoff_start_agent(participants))
-        autonomous_kwargs: dict[str, Any] = {"agents": participants}
         max_turns = self.termination.max_turns
         if max_turns is not None:
-            autonomous_kwargs["turn_limits"] = {getattr(agent, "name"): max_turns for agent in participants}
             handoff_builder = handoff_builder.with_termination_condition(
                 lambda conversation, limit=max_turns: self._count_assistant_messages(conversation) >= limit
             )
-        return handoff_builder.with_autonomous_mode(**autonomous_kwargs).build()
+        return handoff_builder.build()
 
-    async def _build_workflow(self) -> tuple[str, Any, Mapping[str, str]]:
+    async def _build_workflow(self, current_input: str) -> tuple[str, Any, Mapping[str, str]]:
         rendered_instructions = self._render_instructions()
-        pattern = await self._infer_pattern(rendered_instructions=rendered_instructions)
+        participant_plans = self._build_participant_plans()
+        inference = await self._infer_pattern(
+            current_input=current_input,
+            rendered_instructions=rendered_instructions,
+            participant_plans=participant_plans,
+        )
+        pattern = inference.pattern
         inject_team_context = pattern in TEAM_CONTEXT_PATTERNS or self.model is None
         participants, author_name_map = self._build_participants(
+            participant_plans=participant_plans,
             extra_instructions=rendered_instructions if inject_team_context else None,
+            use_managed_participants=pattern in {"sequential", "group-chat", "magentic"},
             # Handoff injects and filters internal tool calls; persisting around each
             # service call can leak those mechanics into later turns.
             require_per_service_call_history_persistence=False,
@@ -530,22 +735,31 @@ class Team:
 
         if pattern in {"sequential", "concurrent"}:
             builder = {"sequential": SequentialBuilder, "concurrent": ConcurrentBuilder}[pattern]
-            return pattern, builder(participants=participants, intermediate_outputs=True).build(), author_name_map
+            workflow_builder = builder(participants=participants, intermediate_outputs=True)
+            return pattern, workflow_builder.build(), author_name_map
 
         if pattern == "handoff":
-            return pattern, self._build_handoff_workflow(participants=participants, handoff_builder_type=HandoffBuilder), author_name_map
+            return (
+                pattern,
+                self._build_handoff_workflow(
+                    participants=participants,
+                    handoff_builder_type=HandoffBuilder,
+                ),
+                author_name_map,
+            )
 
         controller_agent = self._create_controller_agent(instructions=rendered_instructions)
         if pattern == "group-chat":
+            workflow_builder = GroupChatBuilder(
+                participants=participants,
+                orchestrator_agent=controller_agent,
+                orchestrator_name=self.name,
+                max_rounds=self.termination.max_turns,
+                intermediate_outputs=True,
+            )
             return (
                 pattern,
-                GroupChatBuilder(
-                    participants=participants,
-                    orchestrator_agent=controller_agent,
-                    orchestrator_name=self.name,
-                    max_rounds=self.termination.max_turns,
-                    intermediate_outputs=True,
-                ).build(),
+                workflow_builder.build(),
                 author_name_map,
             )
 
@@ -553,6 +767,7 @@ class Team:
             pattern,
             MagenticBuilder(
                 participants=participants,
+                enable_plan_review=False,
                 manager_agent=controller_agent,
                 max_round_count=self.termination.max_turns,
                 intermediate_outputs=True,

@@ -125,7 +125,7 @@ def _read_agent_follow_up_input(
     target_output = sys.stderr if output_stream is None else output_stream
     if not getattr(target_input, "isatty", lambda: False)() or not getattr(target_output, "isatty", lambda: False)():
         raise FtryCliError(
-            "Interactive agent conversations require an interactive terminal on stdin and stderr for `ftry pop -a`."
+            "Interactive request/response conversations require an interactive terminal on stdin and stderr for `ftry pop`."
         )
 
     target_output.write(f"{AGENT_INPUT_PROMPT}")
@@ -140,7 +140,7 @@ def _run_pop_command(agent_file: str | None, team_file: str | None, prompt: str)
     if team_file is not None:
         team = Team.from_file(team_file)
         _render_pop_animation()
-        asyncio.run(team.run(prompt))
+        asyncio.run(team.run(prompt, user_input_provider=_read_agent_follow_up_input))
         return 0
 
     if agent_file is None:

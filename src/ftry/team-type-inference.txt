@@ -21,4 +21,6 @@ Decision rules:
 Return JSON only with this exact shape:
 {"workflow_type":"sequential|concurrent|handoff|group-chat|magentic","reason":"short justification"}
 
-The reason must be concise and mention the decisive characteristics that led to the choice.
+Rules for the JSON:
+
+- `reason` must be concise and mention the decisive characteristics that led to the workflow choice.

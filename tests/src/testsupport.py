@@ -75,7 +75,15 @@ class FakeAgent:
             return FakeResult(
                 "Structured workflow inference",
                 value=FakeAgent.next_value
-                or {"workflow_type": "magentic", "reason": "Stubbed workflow inference result."},
+                or {
+                    "workflow_type": "magentic",
+                    "reason": "Stubbed workflow inference result.",
+                    "human_in_the_loop": {
+                        "enabled": False,
+                        "reason": "No human input needed.",
+                        "agent_names": [],
+                    },
+                },
             )
         return FakeResult("Poeme genere")
 
@@ -122,13 +130,136 @@ class FakeWorkflowMessage:
 class FakeWorkflowResult:
     def __init__(self, messages: list[FakeWorkflowMessage]) -> None:
         self.messages = messages
+        self.text = next(
+            (
+                message.text
+                for message in reversed(messages)
+                if isinstance(message.text, str) and message.text.strip()
+            ),
+            "",
+        )
+
+
+class FakeAgentResponse:
+    def __init__(self, *, messages: list[FakeWorkflowMessage] | None = None, value: object | None = None, **kwargs: object) -> None:
+        self.messages = messages or []
+        self.value = value
+        self.user_input_requests = kwargs.get("user_input_requests", [])
+        self.response_id = kwargs.get("response_id")
+        self.agent_id = kwargs.get("agent_id")
+        self.created_at = kwargs.get("created_at")
+        self.usage_details = kwargs.get("usage_details")
+        self.raw_representation = kwargs.get("raw_representation")
+        self.additional_properties = kwargs.get("additional_properties")
+
+
+class FakeMessage(FakeWorkflowMessage):
+    def __init__(
+        self,
+        role: str,
+        contents: list[object] | None = None,
+        *,
+        author_name: str | None = None,
+        additional_properties: dict[str, object] | None = None,
+    ) -> None:
+        text_parts = [content for content in (contents or []) if isinstance(content, str)]
+        super().__init__(role, " ".join(text_parts), author_name=author_name)
+        self.contents = contents or []
+        self.additional_properties = additional_properties or {}
+
+
+class FakeContent:
+    def __init__(self, *, content_id: str = "content-id", type: str = "text") -> None:
+        self.id = content_id
+        self.type = type
+        self.user_input_request = False
+
+
+
+class FakeAgentExecutorResponse:
+    def __init__(
+        self,
+        executor_id: str,
+        agent_response: FakeWorkflowResult,
+        *,
+        full_conversation: list[FakeWorkflowMessage] | None = None,
+    ) -> None:
+        self.executor_id = executor_id
+        self.agent_response = agent_response
+        self.full_conversation = full_conversation or []
+
+
+class FakeAgentRequestInfoResponse:
+    @staticmethod
+    def approve() -> tuple[str]:
+        return ("approve",)
+
+    @staticmethod
+    def from_strings(values: list[str]) -> tuple[str, list[str]]:
+        return ("feedback", values)
+
+
+class FakeAgentInputRequest:
+    def __init__(
+        self,
+        *,
+        target_agent_id: str | None,
+        conversation: list[FakeWorkflowMessage] | None = None,
+        instruction: str | None = None,
+        metadata: dict[str, object] | None = None,
+    ) -> None:
+        self.target_agent_id = target_agent_id
+        self.conversation = conversation or []
+        self.instruction = instruction
+        self.metadata = metadata or {}
+
+
+class FakeHandoffAgentUserRequest:
+    def __init__(self, agent_response: FakeWorkflowResult) -> None:
+        self.agent_response = agent_response
+
+    def create_response(self, text: str) -> tuple[str, str]:
+        return ("handoff-response", text)
+
+    @staticmethod
+    def terminate() -> tuple[str]:
+        return ("terminate",)
+
+
+class FakePlan:
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+
+class FakeMagenticPlanReviewRequest:
+    def __init__(self, plan_text: str) -> None:
+        self.plan = FakePlan(plan_text)
+        self.current_progress = None
+
+    def approve(self) -> tuple[str]:
+        return ("approve-plan",)
+
+    def revise(self, feedback: str) -> tuple[str, str]:
+        return ("revise-plan", feedback)
 
 
 class FakeWorkflowEvent:
-    def __init__(self, type: str, data: object = None, executor_id: str | None = None) -> None:
+    def __init__(
+        self,
+        type: str,
+        data: object = None,
+        executor_id: str | None = None,
+        *,
+        request_id: str | None = None,
+        request_type: object | None = None,
+        state: object | None = None,
+    ) -> None:
         self.type = type
         self.data = data
         self.executor_id = executor_id
+        self.request_id = request_id
+        self.request_type = request_type
+        self.state = state
 
 
 class FakeGroupChatRequestSentEvent:
@@ -165,14 +296,21 @@ class FakeWorkflowStream:
 
 class FakeWorkflow:
     last_prompt: str | None = None
+    last_responses: dict[str, object] | None = None
+    run_calls: list[dict[str, object]] = []
 
     def __init__(self, pattern: str, **kwargs: object) -> None:
         self.pattern = pattern
         self.kwargs = kwargs
+        self._last_prompt: str | None = None
+        self._request_phase = 0
 
     def _participant_names(self) -> list[str]:
         participants = self.kwargs.get("participants", [])
-        return [participant.name for participant in participants]
+        return [
+            getattr(participant, "name", None) or getattr(participant, "id", None) or "participant"
+            for participant in participants
+        ]
 
     def _team_name(self) -> str:
         if self.pattern == "group-chat":
@@ -189,10 +327,17 @@ class FakeWorkflow:
             return participant_names[-1]
         return "team"
 
-    def run(self, prompt: str, *, stream: bool = False) -> FakeWorkflowStream:
-        FakeWorkflow.last_prompt = prompt
-        assert stream is True
+    def _request_target(self) -> str | None:
+        if self.kwargs.get("request_info_enabled"):
+            request_info_agents = self.kwargs.get("request_info_agents")
+            if isinstance(request_info_agents, list) and request_info_agents:
+                target = request_info_agents[0]
+                if isinstance(target, str) and target:
+                    return target
+        participant_names = self._participant_names()
+        return participant_names[0] if participant_names else None
 
+    def _build_final_output_events(self, prompt: str) -> list[FakeWorkflowEvent]:
         participant_names = self._participant_names()
         events: list[FakeWorkflowEvent] = []
 
@@ -221,12 +366,6 @@ class FakeWorkflow:
             source, target = participant_names[:2]
             events.extend(
                 [
-                    FakeWorkflowEvent("executor_invoked", executor_id=source),
-                    FakeWorkflowEvent(
-                        "output",
-                        FakeWorkflowResult([FakeWorkflowMessage("assistant", "Initial triage", author_name=source)]),
-                        executor_id=source,
-                    ),
                     FakeWorkflowEvent("handoff_sent", FakeHandoffSentEvent(source, target)),
                     FakeWorkflowEvent("executor_invoked", executor_id=target),
                     FakeWorkflowEvent(
@@ -256,7 +395,130 @@ class FakeWorkflow:
                 executor_id=self._team_name(),
             )
         )
-        return FakeWorkflowStream(events)
+        return events
+
+    def run(
+        self,
+        prompt: str | None = None,
+        *,
+        stream: bool = False,
+        responses: dict[str, object] | None = None,
+    ) -> FakeWorkflowStream:
+        if prompt is not None:
+            FakeWorkflow.last_prompt = prompt
+            self._last_prompt = prompt
+        FakeWorkflow.last_responses = responses
+        FakeWorkflow.run_calls.append(
+            {
+                "prompt": prompt,
+                "responses": responses,
+                "stream": stream,
+            }
+        )
+        assert stream is True
+
+        effective_prompt = self._last_prompt or ""
+        request_target = self._request_target()
+
+        if (
+            self.pattern == "sequential"
+            and request_target is not None
+            and self.kwargs.get("request_info_enabled")
+            and responses is None
+            and self._request_phase == 0
+        ):
+            self._request_phase = 1
+            return FakeWorkflowStream(
+                [
+                    FakeWorkflowEvent(
+                        "request_info",
+                        FakeAgentInputRequest(
+                            target_agent_id=request_target,
+                            conversation=[
+                                FakeWorkflowMessage("user", effective_prompt, author_name="user"),
+                                FakeWorkflowMessage(
+                                    "assistant",
+                                    f"{request_target} needs feedback about {effective_prompt}",
+                                    author_name=request_target,
+                                ),
+                            ],
+                        ),
+                        executor_id=request_target,
+                        request_id="req-sequential",
+                    ),
+                ]
+            )
+
+        if (
+            self.pattern == "group-chat"
+            and request_target is not None
+            and self.kwargs.get("request_info_enabled")
+            and responses is None
+            and self._request_phase == 0
+        ):
+            self._request_phase = 1
+            return FakeWorkflowStream(
+                [
+                    FakeWorkflowEvent("group_chat", FakeGroupChatRequestSentEvent(request_target)),
+                    FakeWorkflowEvent(
+                        "request_info",
+                        FakeAgentInputRequest(
+                            target_agent_id=request_target,
+                            instruction=f"Pause before {request_target} speaks.",
+                            conversation=[
+                                FakeWorkflowMessage("user", effective_prompt, author_name="user"),
+                                FakeWorkflowMessage(
+                                    "assistant",
+                                    f"{request_target} needs guidance before speaking about {effective_prompt}",
+                                    author_name=request_target,
+                                ),
+                            ],
+                        ),
+                        executor_id=request_target,
+                        request_id="req-group-chat",
+                    ),
+                ]
+            )
+
+        if (
+            self.pattern == "handoff"
+            and request_target is not None
+            and not self.kwargs.get("autonomous_mode")
+            and responses is None
+            and self._request_phase == 0
+        ):
+            agent_response = FakeWorkflowResult(
+                [FakeWorkflowMessage("assistant", "Initial triage", author_name=request_target)]
+            )
+            self._request_phase = 1
+            return FakeWorkflowStream(
+                [
+                    FakeWorkflowEvent("executor_invoked", executor_id=request_target),
+                    FakeWorkflowEvent("output", agent_response, executor_id=request_target),
+                    FakeWorkflowEvent(
+                        "request_info",
+                        FakeHandoffAgentUserRequest(agent_response),
+                        executor_id=request_target,
+                        request_id="req-handoff",
+                    ),
+                ]
+            )
+
+        if self.pattern == "magentic" and self.kwargs.get("enable_plan_review") and responses is None and self._request_phase == 0:
+            self._request_phase = 1
+            return FakeWorkflowStream(
+                [
+                    FakeWorkflowEvent(
+                        "request_info",
+                        FakeMagenticPlanReviewRequest(f"Plan for {effective_prompt}"),
+                        executor_id=self._team_name(),
+                        request_id="req-magentic",
+                        request_type=FakeMagenticPlanReviewRequest,
+                    )
+                ]
+            )
+
+        return FakeWorkflowStream(self._build_final_output_events(effective_prompt))
 
 
 class FakeSequentialBuilder:
@@ -316,6 +578,9 @@ class FakeHandoffBuilder:
     def __new__(cls, **kwargs: object) -> "FakeHandoffBuilder":
         instance = super().__new__(cls)
         cls.last_kwargs = dict(kwargs)
+        cls.last_start_agent = None
+        cls.last_autonomous_kwargs = None
+        cls.last_termination_condition = None
         return instance
 
     def with_start_agent(self, agent: FakeAgent) -> "FakeHandoffBuilder":
@@ -324,6 +589,15 @@ class FakeHandoffBuilder:
 
     def with_autonomous_mode(self, **kwargs: object) -> "FakeHandoffBuilder":
         FakeHandoffBuilder.last_autonomous_kwargs = dict(kwargs)
+        assert self.last_kwargs is not None
+        self.last_kwargs["autonomous_mode"] = True
+        return self
+
+    def with_request_info(self, *, agents: list[str] | None = None) -> "FakeHandoffBuilder":
+        assert self.last_kwargs is not None
+        self.last_kwargs["request_info_enabled"] = True
+        if agents is not None:
+            self.last_kwargs["request_info_agents"] = list(agents)
         return self
 
     def with_termination_condition(self, termination_condition: object) -> "FakeHandoffBuilder":
@@ -335,13 +609,44 @@ class FakeHandoffBuilder:
 
 
 def make_fake_agent_framework_modules() -> dict[str, types.ModuleType]:
+    def fake_response_handler(func=None, **kwargs: object):
+        def decorator(inner):
+            return inner
+
+        if func is not None and callable(func) and not kwargs:
+            return decorator(func)
+        return decorator
+
     fake_package = types.ModuleType("agent_framework")
+    fake_package.AgentExecutorResponse = FakeAgentExecutorResponse
+    fake_package.AgentInputRequest = FakeAgentInputRequest
+    fake_package.AgentExecutor = type(
+        "FakeAgentExecutor",
+        (),
+        {
+            "__init__": lambda self, agent, **kwargs: (
+                setattr(self, "_agent", agent),
+                setattr(self, "_session", object()),
+                setattr(self, "_pending_agent_requests", {}),
+                setattr(self, "_cache", []),
+                setattr(self, "_full_conversation", []),
+                setattr(self, "id", kwargs.get("id") or getattr(agent, "name", "agent")),
+                setattr(self, "name", kwargs.get("id") or getattr(agent, "name", "agent")),
+            )[-1],
+            "_prepare_agent_run_args": lambda self, raw_kwargs: (None, None),
+        },
+    )
+    fake_package.AgentResponse = FakeAgentResponse
+    fake_package.Content = FakeContent
+    fake_package.Message = FakeMessage
+    fake_package.response_handler = fake_response_handler
     fake_openai_module = types.ModuleType("agent_framework.openai")
     fake_openai_module.OpenAIChatCompletionClient = FakeOpenAIChatCompletionClient
     fake_orchestrations_module = types.ModuleType("agent_framework.orchestrations")
     fake_orchestrations_module.SequentialBuilder = FakeSequentialBuilder
     fake_orchestrations_module.ConcurrentBuilder = FakeConcurrentBuilder
     fake_orchestrations_module.GroupChatBuilder = FakeGroupChatBuilder
+    fake_orchestrations_module.HandoffAgentUserRequest = FakeHandoffAgentUserRequest
     fake_orchestrations_module.HandoffBuilder = FakeHandoffBuilder
     fake_orchestrations_module.MagenticBuilder = FakeMagenticBuilder
     return {
@@ -362,6 +667,8 @@ def reset_fakes() -> None:
     FakeOpenAIChatCompletionClient.last_api_key = None
     FakeOpenAIChatCompletionClient.last_agent = None
     FakeWorkflow.last_prompt = None
+    FakeWorkflow.last_responses = None
+    FakeWorkflow.run_calls = []
     FakeSequentialBuilder.last_kwargs = None
     FakeConcurrentBuilder.last_kwargs = None
     FakeGroupChatBuilder.last_kwargs = None

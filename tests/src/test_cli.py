@@ -50,7 +50,7 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         load_team.assert_called_once_with("team.yaml")
-        loaded_team.run.assert_awaited_once_with("Bonjour")
+        loaded_team.run.assert_awaited_once_with("Bonjour", user_input_provider=cli._read_agent_follow_up_input)
         render_animation.assert_called_once_with()
 
     def test_main_reports_errors_and_direct_pop_requires_a_source(self) -> None:
