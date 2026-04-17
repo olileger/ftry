@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import types
 from dataclasses import dataclass, field
-from importlib.resources import files
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
@@ -37,7 +36,32 @@ from .Tools import (
 )
 
 TEAM_PATTERN_VALUES = ("sequential", "concurrent", "handoff", "group-chat", "magentic")
-TEAM_TYPE_INFERENCE_PROMPT_FILE = "team-type-inference.txt"
+TEAM_TYPE_INFERENCE_PROMPT_TEMPLATE = """You are selecting the most appropriate Microsoft Agent Framework workflow type for a team configuration.
+
+The workflow summaries below come from the official Microsoft Agent Framework documentation:
+
+- sequential: agents are organized in a pipeline; each agent processes the task in turn and passes its output to the next. Use this when each step builds on the previous one.
+- concurrent: multiple agents work on the same task in parallel and independently, and their results are aggregated. Use this when specialists can work independently on the same input.
+- handoff: agents transfer control directly to one another based on the context or user request, without a central orchestrator. Use this when task ownership should move dynamically between specialists.
+- group-chat: multiple agents collaborate through an orchestrated conversation with shared context, iterative refinement, and multi-perspective discussion. Use this when agents should review, discuss, and improve together over multiple turns.
+- magentic: a manager dynamically plans, selects agents, tracks progress, and replans for complex open-ended tasks. Use this only when the solution path is not known in advance and dynamic planning/replanning is central.
+
+Decision rules:
+- Pick exactly one workflow type from: sequential, concurrent, handoff, group-chat, magentic.
+- Prefer the simplest workflow that fully matches the team design.
+- Do not choose concurrent if later agents depend on earlier agents' outputs.
+- Do not choose sequential if agents are meant to work independently on the same input.
+- Do not choose handoff unless control should be transferred directly between specialists.
+- Do not choose group-chat unless iterative multi-turn collaboration is essential.
+- Do not choose magentic unless complex planning or replanning is essential.
+- Ignore the human language used in the team definition. The team can be written in any language.
+
+Return JSON only with this exact shape:
+{"workflow_type":"sequential|concurrent|handoff|group-chat|magentic","reason":"short justification"}
+
+Rules for the JSON:
+
+- `reason` must be concise and mention the decisive characteristics that led to the workflow choice."""
 TEAM_TYPE_INFERENCE_RESPONSE_FORMAT = {
     "type": "json_schema",
     "json_schema": {
@@ -406,7 +430,7 @@ class Team:
 
     @staticmethod
     def _load_team_type_inference_prompt_template() -> str:
-        return files("ftry").joinpath(TEAM_TYPE_INFERENCE_PROMPT_FILE).read_text(encoding="utf-8")
+        return TEAM_TYPE_INFERENCE_PROMPT_TEMPLATE
 
     @staticmethod
     def _extract_request_prompt(source: Any) -> str:
