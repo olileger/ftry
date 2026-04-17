@@ -428,7 +428,8 @@ class CliEndToEndTests(unittest.TestCase):
 
         line_result = self._run_cli("line")
         self.assertEqual(line_result.returncode, 0)
-        self.assertIn("______", _strip_ansi(line_result.stdout))
+        self.assertIn("-----", _strip_ansi(line_result.stdout))
+        self.assertIn("_____", _strip_ansi(line_result.stdout))
 
     def test_pop_agent_sample_runs_end_to_end_with_samples_and_dotenv(self) -> None:
         result = self._run_cli(

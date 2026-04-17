@@ -4,7 +4,6 @@ import logging
 import os
 import re
 import sys
-from importlib.resources import files
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
@@ -51,6 +50,7 @@ LINE_COLOR_TOKENS = {
     LINE_RESET_TOKEN: RESET,
 }
 LINE_COLOR_MARKERS = tuple(token for token in LINE_COLOR_TOKENS if token != LINE_RESET_TOKEN)
+ASCII_ART_DIR = Path(__file__).resolve().parent / "ascii-art"
 
 
 class FtryCliError(Exception):
@@ -58,7 +58,7 @@ class FtryCliError(Exception):
 
 
 def _load_ascii_banner(file_name: str) -> str:
-    content = files("ftry").joinpath(file_name).read_text(encoding="utf-8")
+    content = (ASCII_ART_DIR / file_name).read_text(encoding="utf-8")
     rendered_lines: list[str] = []
 
     for raw_line in content.splitlines():

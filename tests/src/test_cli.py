@@ -21,7 +21,8 @@ class CliTests(unittest.TestCase):
         self.assertEqual(line_exit_code, 0)
         rendered = stdout.getvalue()
         self.assertIn("build", rendered)
-        self.assertIn("______", strip_ansi(rendered))
+        self.assertIn("-----", strip_ansi(rendered))
+        self.assertIn("_____", strip_ansi(rendered))
 
     def test_run_pop_command_dispatches_agent_prompts(self) -> None:
         loaded_agent = Mock()
