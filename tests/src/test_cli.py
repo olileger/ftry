@@ -29,14 +29,14 @@ class CliTests(unittest.TestCase):
 
         with (
             patch("ftry.cli.StandaloneAgent.from_file", return_value=loaded_agent) as load_agent,
-            patch("ftry.cli._render_pop_animation") as render_animation,
+            patch("ftry.cli._print_pop_banner") as print_pop_banner,
         ):
             exit_code = cli._run_pop_command("agent.yaml", None, "Bonjour")
 
         self.assertEqual(exit_code, 0)
+        print_pop_banner.assert_called_once_with()
         load_agent.assert_called_once_with("agent.yaml")
         loaded_agent.run.assert_awaited_once_with("Bonjour", user_input_provider=cli._read_agent_follow_up_input)
-        render_animation.assert_called_once_with()
 
     def test_run_pop_command_dispatches_team_prompts(self) -> None:
         loaded_team = Mock()
@@ -44,14 +44,14 @@ class CliTests(unittest.TestCase):
 
         with (
             patch("ftry.cli.Team.from_file", return_value=loaded_team) as load_team,
-            patch("ftry.cli._render_pop_animation") as render_animation,
+            patch("ftry.cli._print_pop_banner") as print_pop_banner,
         ):
             exit_code = cli._run_pop_command(None, "team.yaml", "Bonjour")
 
         self.assertEqual(exit_code, 0)
+        print_pop_banner.assert_called_once_with()
         load_team.assert_called_once_with("team.yaml")
         loaded_team.run.assert_awaited_once_with("Bonjour", user_input_provider=cli._read_agent_follow_up_input)
-        render_animation.assert_called_once_with()
 
     def test_main_reports_errors_and_direct_pop_requires_a_source(self) -> None:
         with self.assertRaisesRegex(cli.FtryCliError, "Either `-a/--agent-file` or `-t/--team-file` must be provided."):
@@ -80,29 +80,18 @@ class CliTests(unittest.TestCase):
         self.assertIsNone(args.agent_file)
         self.assertEqual(args.prompt, "Bonjour")
 
-    def test_render_pop_animation_only_runs_in_a_tty(self) -> None:
+    def test_print_pop_banner_only_runs_in_a_tty(self) -> None:
         non_tty_stream = io.StringIO()
-        cli._render_pop_animation(stream=non_tty_stream, sleep=lambda _: self.fail("sleep should not be called"))
+        cli._print_pop_banner(stream=non_tty_stream)
         self.assertEqual(non_tty_stream.getvalue(), "")
 
         tty_stream = FakeTtyStream()
-        delays: list[float] = []
-
-        cli._render_pop_animation(stream=tty_stream, sleep=delays.append)
+        cli._print_pop_banner(stream=tty_stream)
 
         rendered = tty_stream.getvalue()
         plain_rendered = strip_ansi(rendered)
-        self.assertTrue(rendered.startswith(cli.POP_ANIMATION_CURSOR_HIDE))
-        self.assertTrue(rendered.endswith(f"\n{cli.POP_ANIMATION_CURSOR_SHOW}"))
-        self.assertIn(cli.BRIGHT_PINK, rendered)
-        self.assertIn(strip_ansi(cli._load_pop_banner()).splitlines()[0], plain_rendered)
-        self.assertIn("         .  .", plain_rendered)
-        self.assertIn(r"         \______/>", plain_rendered)
-        self.assertIn("          o    o", plain_rendered)
-        self.assertIn("_" * 40, plain_rendered)
-        self.assertIn(cli.POP_ANIMATION_CLEAR_LINE, rendered)
-        self.assertNotIn(f"{cli.POP_ANIMATION_CLEAR_LINE}{cli.POP_ANIMATION_CURSOR_SHOW}", rendered)
-        self.assertEqual(delays, [cli.POP_ANIMATION_STEP_SECONDS] * len(cli.POP_ANIMATION_FRAMES))
+        self.assertIn("======", plain_rendered)
+        self.assertIn("_____", plain_rendered)
 
     def test_pop_rejects_team_file_passed_as_agent_file(self) -> None:
         stderr = io.StringIO()
