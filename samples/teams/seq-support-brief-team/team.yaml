@@ -23,3 +23,4 @@ prompt: |
   - Do not start a multi-turn discussion.
   - Each agent must build on the previous agent's result.
   - The final output must be the polished customer-facing update.
+  - You DON'T NEED ANY USER INPUT for your work.

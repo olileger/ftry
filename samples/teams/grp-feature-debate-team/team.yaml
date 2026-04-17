@@ -41,4 +41,5 @@ prompt: |
   - Keep the final team answer concise and actionable.
   - Here is the list of agents with their expertise:
       {roles}
+  - You DON'T NEED ANY USER INPUT for your work.
 

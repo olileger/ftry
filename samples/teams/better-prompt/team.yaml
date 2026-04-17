@@ -42,3 +42,4 @@ prompt: |
   - You should ONLY select the Runner agent if the prompt is complete and it is time to generate an output.
   - Do not exceed 9 turns of conversation between the Prompter and Reviewer.
   - If after 9 turns the prompt is still not ready, select the Runner agent to execute the current prompt.
+  - You DON'T NEED ANY USER INPUT for your work.

@@ -16,3 +16,5 @@ prompt: |
   Remove ambiguity when it can be done without inventing facts.
 
   Return the final version only.
+
+  You DON'T NEED ANY USER INPUT for your work.

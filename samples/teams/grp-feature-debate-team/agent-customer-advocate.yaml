@@ -22,4 +22,5 @@ prompt: |
   - Do not ask the user follow-up questions.
   - Do not use tools, MCP servers, or external systems.
   - Keep your contribution short and concrete.
+  - You DON'T NEED ANY USER INPUT for your work.
 

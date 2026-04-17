@@ -26,3 +26,4 @@ prompt: |
   - Each agent must build on the previous agent's result.
   - A brief user clarification is allowed only when one missing fact blocks a reliable draft.
   - The final output must be the polished customer-facing update.
+  - You SHOULD RELY ON USER INPUT when needed.
