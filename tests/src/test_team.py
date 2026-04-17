@@ -15,6 +15,7 @@ from tests.src.testsupport import (
     CONCURRENT_SAMPLE_TEAM_FILE,
     FakeAgent,
     FakeConcurrentBuilder,
+    FakeContent,
     FakeGroupChatBuilder,
     FakeHandoffBuilder,
     FakeMagenticBuilder,
@@ -79,6 +80,12 @@ class TeamTests(unittest.TestCase):
 
     def _make_team(self, *agents: team_module.AgentConfig, **kwargs: object) -> team_module.Team:
         return team_module.Team(self._make_team_config(*agents, **kwargs))
+
+    @staticmethod
+    def _make_user_input_request(prompt: str) -> FakeContent:
+        request = FakeContent.from_text(prompt)
+        request.user_input_request = True
+        return request
 
     def test_termination_helper_parses_and_validates_max_turns(self) -> None:
         self.assertEqual(team_module.Team._parse_termination(None), team_module.TeamTerminationConfig())
@@ -191,6 +198,10 @@ class TeamTests(unittest.TestCase):
         first_agent = FakeAgent(name="Alpha", instructions="Handle the task.", description="First specialist.")
         second_agent = FakeAgent(name="Beta", instructions="Continue the work.", description="Second specialist.")
         self.assertEqual(team_module.Team._select_handoff_start_agent([first_agent, second_agent]), first_agent)
+        self.assertEqual(
+            team_module.Team._select_handoff_start_agent([first_agent, second_agent], preferred_agent_name="Beta"),
+            second_agent,
+        )
 
     def test_team_from_file_validates_nominal_and_error_cases(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -555,7 +566,7 @@ class TeamTests(unittest.TestCase):
             self.assertEqual([participant.name for participant in participants], ["Agent", "Agent-2", "Router"])
             self.assertEqual(author_name_map["Agent-2"], "Agent")
             self.assertIn("<TeamContext>", participants[0].instructions)
-            self.assertEqual(team_module.Team._select_handoff_start_agent(participants).name, "Router")
+            self.assertEqual(team_module.Team._select_handoff_start_agent(participants).name, "Agent")
             self.assertEqual(
                 team_module.Team._count_assistant_messages(
                     [
@@ -603,7 +614,7 @@ class TeamTests(unittest.TestCase):
                 "handoff",
                 "Routing.",
             )
-            asyncio.run(
+            handoff_pattern, handoff_workflow, _, handoff_signal_state = asyncio.run(
                 self._make_team(
                     router,
                     specialist,
@@ -612,9 +623,29 @@ class TeamTests(unittest.TestCase):
                     max_turns=3,
                 )._build_workflow("I need help with billing.")
             )
+            self.assertEqual(handoff_pattern, "handoff")
             self.assertEqual(FakeHandoffBuilder.last_start_agent.name, "Router")
-            self.assertIsNone(FakeHandoffBuilder.last_autonomous_kwargs)
+            self.assertEqual(FakeHandoffBuilder.last_autonomous_kwargs, {})
             self.assertTrue(callable(FakeHandoffBuilder.last_termination_condition))
+            self.assertTrue(all(not participant.middleware for participant in FakeHandoffBuilder.last_kwargs["participants"]))
+            self.assertTrue(all(not participant.agent_middleware for participant in FakeHandoffBuilder.last_kwargs["participants"]))
+            self.assertTrue(
+                all(
+                    participant.require_per_service_call_history_persistence
+                    for participant in FakeHandoffBuilder.last_kwargs["participants"]
+                )
+            )
+            self.assertTrue(
+                all(
+                    {tool.name for tool in participant.default_options.get("tools", [])}
+                    == {"request_user_input", "final_answer"}
+                    for participant in FakeHandoffBuilder.last_kwargs["participants"]
+                )
+            )
+            self.assertIs(getattr(handoff_workflow, "handoff_hil_signal_state", None), handoff_signal_state)
+            self.assertFalse(FakeHandoffBuilder.last_termination_condition([]))
+            handoff_signal_state.finalize("Done", "Specialist")
+            self.assertTrue(FakeHandoffBuilder.last_termination_condition([]))
 
             FakeAgent.next_value = self._make_inference(
                 "group-chat",
@@ -635,6 +666,19 @@ class TeamTests(unittest.TestCase):
             self.assertEqual(
                 [participant.name for participant in FakeGroupChatBuilder.last_kwargs["participants"]],
                 ["Agent", "Specialist"],
+            )
+            self.assertTrue(
+                all(
+                    not participant.require_per_service_call_history_persistence
+                    for participant in FakeGroupChatBuilder.last_kwargs["participants"]
+                )
+            )
+            self.assertTrue(
+                all(
+                    participant.default_options.get("response_format", {}).get("json_schema", {}).get("name")
+                    == "agent_turn_response"
+                    for participant in FakeGroupChatBuilder.last_kwargs["participants"]
+                )
             )
 
             FakeAgent.next_value = self._make_inference(
@@ -682,18 +726,47 @@ class TeamTests(unittest.TestCase):
             )
             output = asyncio.run(team.run("Route this request", user_input_provider=user_input_provider))
 
-        self.assertEqual(output, "[Specialist]\nhandoff:Route this request")
+        self.assertEqual(output, "[Specialist]\nSpecialist answer")
         self.assertEqual(prompts_seen, ["Initial triage"])
         self.assertEqual(len(FakeWorkflow.run_calls), 2)
-        self.assertEqual(
-            FakeWorkflow.last_responses,
-            {"req-handoff": ("handoff-response", "The billing problem is on order 42.")},
-        )
+        self.assertIsNone(FakeWorkflow.last_responses)
+        resumed_prompt = FakeWorkflow.run_calls[1]["prompt"]
+        self.assertIn("Original user request:\nRoute this request", resumed_prompt)
+        self.assertIn("Context already produced by the team before the clarification pause:", resumed_prompt)
+        self.assertIn("1. Router: Initial triage", resumed_prompt)
+        self.assertIn("1. Question: Initial triage", resumed_prompt)
+        self.assertIn("User answer: The billing problem is on order 42.", resumed_prompt)
         plain_stderr = strip_ansi(stderr.getvalue())
         self.assertIn("TEAM (H) Handoff squad | pattern: handoff | input:", plain_stderr)
         self.assertIn("TEAM (H) Handoff squad | request-info:", plain_stderr)
         self.assertIn("Router --> Specialist | input:", plain_stderr)
         self.assertIn("TEAM (H) Handoff squad <-- Specialist | final-output:", plain_stderr)
+
+    def test_build_handoff_resume_prompt_preserves_original_request_and_answers(self) -> None:
+        resumed_prompt = team_module.Team._build_handoff_resume_prompt(
+            initial_prompt="I was charged twice for my subscription.",
+            agent_context=[
+                ("Billing Specialist", "I need the date of the duplicate charges before I can resolve the issue."),
+            ],
+            user_inputs=[
+                (
+                    "Could you please confirm if both charges appeared on the same date and from the same payment method?",
+                    "yes I confirm",
+                ),
+                (
+                    "Can you also confirm the last four digits of the card used?",
+                    "4242",
+                ),
+            ],
+        )
+
+        self.assertIn("Original user request:\nI was charged twice for my subscription.", resumed_prompt)
+        self.assertIn("Context already produced by the team before the clarification pause:", resumed_prompt)
+        self.assertIn("1. Billing Specialist: I need the date of the duplicate charges before I can resolve the issue.", resumed_prompt)
+        self.assertIn("1. Question: Could you please confirm if both charges appeared on the same date and from the same payment method?", resumed_prompt)
+        self.assertIn("User answer: yes I confirm", resumed_prompt)
+        self.assertIn("2. Question: Can you also confirm the last four digits of the card used?", resumed_prompt)
+        self.assertIn("User answer: 4242", resumed_prompt)
 
     def test_run_prefers_last_agent_output_when_team_authors_final_message(self) -> None:
         reset_fakes()
@@ -799,11 +872,9 @@ class TeamTests(unittest.TestCase):
         self.assertNotIn("request-info", plain_stderr)
         self.assertEqual(plain_stderr.count("TEAM (M) Launch Planning team | pattern: magentic | input:"), 1)
 
-    def test_create_pending_request_supports_team_agent_and_handoff_requests(self) -> None:
-        team_agent_request = team_module.TeamAgentUserInputRequest(
-            prompt="What constraint matters most?",
-            agent_name="Product Lead",
-        )
+    def test_create_pending_request_supports_native_user_input_requests(self) -> None:
+        team_agent_request = FakeContent.from_text("What constraint matters most?")
+        team_agent_request.user_input_request = True
         team_event = type("Event", (), {"request_id": "req-team", "data": team_agent_request})()
         state = team_module._TeamTraceState(
             pattern="group-chat",
@@ -812,25 +883,13 @@ class TeamTests(unittest.TestCase):
             last_visible_input="Prompt",
         )
 
-        with patch.object(team_module.Team, "_load_handoff_request_type", return_value=type("Handoff", (), {})):
-            pending_request = team_module.Team._create_pending_request(team_event, state=state)
+        pending_request = team_module.Team._create_pending_request(team_event, state=state)
 
         self.assertEqual(pending_request.prompt, "What constraint matters most?")
-        self.assertEqual(pending_request.build_response("Time to market"), "Time to market")
+        response = pending_request.build_response("Time to market")
+        self.assertIsInstance(response, FakeContent)
+        self.assertEqual(response.text, "Time to market")
         self.assertEqual(state.last_visible_input, "What constraint matters most?")
-
-        with patch.dict(sys.modules, make_fake_agent_framework_modules(), clear=False):
-            handoff_request = team_module.Team._load_handoff_request_type()(
-                FakeWorkflowResult([type("Message", (), {"text": "Initial triage"})()])
-            )
-            handoff_event = type("Event", (), {"request_id": "req-handoff", "data": handoff_request})()
-            pending_request = team_module.Team._create_pending_request(handoff_event, state=state)
-
-        self.assertEqual(pending_request.prompt, "Initial triage")
-        self.assertEqual(
-            pending_request.build_response("The billing problem is on order 42."),
-            ("handoff-response", "The billing problem is on order 42."),
-        )
 
     def test_process_workflow_stream_requires_provider_for_request_info(self) -> None:
         team = self._make_team(
@@ -857,10 +916,7 @@ class TeamTests(unittest.TestCase):
                             {
                                 "type": "request_info",
                                 "request_id": "req-team",
-                                "data": team_module.TeamAgentUserInputRequest(
-                                    prompt="Need one clarifying detail.",
-                                    agent_name="Researcher",
-                                ),
+                                "data": self._make_user_input_request("Need one clarifying detail."),
                             },
                         )()
                     ]
@@ -893,10 +949,7 @@ class TeamTests(unittest.TestCase):
                                     {
                                         "type": "request_info",
                                         "request_id": "req-team",
-                                        "data": team_module.TeamAgentUserInputRequest(
-                                            prompt="Need one clarifying detail.",
-                                            agent_name="Researcher",
-                                        ),
+                                        "data": self._make_user_input_request("Need one clarifying detail."),
                                     },
                                 )()
                             ]
@@ -908,7 +961,8 @@ class TeamTests(unittest.TestCase):
                 user_input_provider=lambda prompt: f"reply:{prompt}",
             )
         )
-        self.assertEqual(responses, {"req-team": "reply:Need one clarifying detail."})
+        self.assertIsInstance(responses["req-team"], FakeContent)
+        self.assertEqual(responses["req-team"].text, "reply:Need one clarifying detail.")
 
     def test_team_trace_state_final_output_covers_no_visible_message_fallbacks(self) -> None:
         state = team_module._TeamTraceState(
@@ -1041,10 +1095,7 @@ class TeamTests(unittest.TestCase):
 
         return _anext
 
-    def test_request_info_helpers_cover_prompt_and_handoff_loading(self) -> None:
-        with patch.dict(sys.modules, make_fake_agent_framework_modules(), clear=False):
-            self.assertEqual(team_module.Team._load_handoff_request_type().__name__, "FakeHandoffAgentUserRequest")
-
+    def test_request_info_helpers_cover_prompt_extraction(self) -> None:
         with self.assertRaisesRegex(team_module.FtryCliError, "visible prompt"):
             team_module.Team._extract_request_prompt(None)
 

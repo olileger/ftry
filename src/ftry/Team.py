@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import json
+import types
 from dataclasses import dataclass, field
 from importlib.resources import files
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from .Agent import AgentConfig, AgentModelConfig
-from .TeamAgent import TeamAgent, TeamAgentUserInputRequest
+from .TeamAgent import HandoffHilSignalState, TeamAgent
 from .Tools import (
     FtryCliError,
     _build_agent_trace_colors,
@@ -59,7 +60,6 @@ TEAM_TYPE_INFERENCE_RESPONSE_FORMAT = {
         },
     },
 }
-HANDOFF_START_HINTS = ("triage", "router", "routing", "route", "dispatcher", "coordinator")
 TEAM_CONTEXT_PATTERNS = frozenset({"sequential", "concurrent", "handoff"})
 TEAM_SHARED_RESULT_PATTERNS = frozenset({"group-chat", "concurrent", "magentic"})
 TEAM_REQUEST_DRIVEN_PATTERNS = frozenset({"group-chat", "handoff"})
@@ -246,7 +246,8 @@ class Team:
         return self._config.termination
 
     async def run(self, prompt: str, *, user_input_provider: UserInputProvider | None = None) -> str:
-        pattern, workflow, author_name_map = await self._build_workflow(prompt)
+        pattern, workflow, author_name_map, handoff_hil_signal_state = await self._build_workflow(prompt)
+        initial_prompt = prompt
         state = _TeamTraceState(
             pattern=pattern,
             team_name=self.name,
@@ -258,11 +259,22 @@ class Team:
 
         pending_responses: dict[str, Any] | None = None
         first_run = True
+        next_prompt: str | None = prompt
+        handoff_user_inputs: list[tuple[str, str]] = []
+        handoff_agent_context: list[tuple[str, str]] = []
 
         while True:
             if first_run:
-                stream = workflow.run(prompt, stream=True)
+                if handoff_hil_signal_state is not None:
+                    handoff_hil_signal_state.clear()
+                stream = workflow.run(next_prompt, stream=True)
                 first_run = False
+                next_prompt = None
+            elif next_prompt is not None:
+                if handoff_hil_signal_state is not None:
+                    handoff_hil_signal_state.clear()
+                stream = workflow.run(next_prompt, stream=True)
+                next_prompt = None
             elif pending_responses is not None:
                 stream = workflow.run(stream=True, responses=pending_responses)
             else:
@@ -274,6 +286,33 @@ class Team:
                 author_name_map=author_name_map,
                 user_input_provider=user_input_provider,
             )
+
+            if handoff_hil_signal_state is not None:
+                if handoff_hil_signal_state.action == "request_user_input":
+                    request_prompt, user_input, requesting_agent = self._resolve_handoff_user_input(
+                        signal_state=handoff_hil_signal_state,
+                        state=state,
+                        user_input_provider=user_input_provider,
+                    )
+                    if state.last_agent_name and state.last_agent_full_output:
+                        handoff_agent_context.append((author_name_map.get(state.last_agent_name, state.last_agent_name), state.last_agent_full_output))
+                    handoff_user_inputs.append((request_prompt, user_input))
+                    next_prompt = self._build_handoff_resume_prompt(
+                        initial_prompt=initial_prompt,
+                        agent_context=handoff_agent_context,
+                        user_inputs=handoff_user_inputs,
+                    )
+                    pattern, workflow, author_name_map, handoff_hil_signal_state = await self._build_workflow(
+                        next_prompt,
+                        forced_pattern=pattern,
+                        forced_handoff_start_agent=requesting_agent,
+                    )
+                    pending_responses = None
+                    state.final_payload = None
+                    continue
+
+                if handoff_hil_signal_state.action == "final_answer":
+                    state.final_payload = self._build_handoff_signal_payload(handoff_hil_signal_state)
 
         state.flush_buffer()
         rendered_output = _format_final_team_output(state.final_payload, author_name_map=author_name_map)
@@ -370,22 +409,6 @@ class Team:
         return files("ftry").joinpath(TEAM_TYPE_INFERENCE_PROMPT_FILE).read_text(encoding="utf-8")
 
     @staticmethod
-    def _contains_any(text: str, hints: Sequence[str]) -> bool:
-        return any(hint in text for hint in hints)
-
-    @staticmethod
-    def _load_handoff_request_type() -> Any:
-        try:
-            from agent_framework.orchestrations import HandoffAgentUserRequest
-        except ImportError as exc:  # pragma: no cover - covered by CLI error path
-            raise FtryCliError(
-                "Microsoft Agent Framework request/response support is required for `ftry pop -t`. "
-                "Reinstall the project with `python -m pip install -e .`."
-            ) from exc
-
-        return HandoffAgentUserRequest
-
-    @staticmethod
     def _extract_request_prompt(source: Any) -> str:
         if source is None:
             raise FtryCliError("Team request_info did not include a visible prompt for the user.")
@@ -414,9 +437,78 @@ class Team:
             _trace_block(prompt),
         )
 
+    @staticmethod
+    def _build_handoff_signal_payload(signal_state: HandoffHilSignalState) -> list[Any]:
+        if not signal_state.message:
+            return []
+        return [
+            types.SimpleNamespace(
+                role="assistant",
+                text=signal_state.message,
+                author_name=signal_state.actor_name,
+            )
+        ]
+
+    @staticmethod
+    def _build_handoff_resume_prompt(
+        *,
+        initial_prompt: str,
+        agent_context: Sequence[tuple[str, str]],
+        user_inputs: Sequence[tuple[str, str]],
+    ) -> str:
+        if not agent_context and not user_inputs:
+            return initial_prompt
+
+        rendered_agent_context = "\n".join(
+            [
+                f"{index}. {agent_name}: {message}"
+                for index, (agent_name, message) in enumerate(agent_context, start=1)
+            ]
+        )
+        rendered_user_inputs = "\n".join(
+            [
+                f"{index}. Question: {question}\n   User answer: {answer}"
+                for index, (question, answer) in enumerate(user_inputs, start=1)
+            ]
+        )
+        sections = [f"Original user request:\n{initial_prompt}"]
+        if rendered_agent_context:
+            sections.append(f"Context already produced by the team before the clarification pause:\n{rendered_agent_context}")
+        if rendered_user_inputs:
+            sections.append(f"Additional user information collected during the handoff workflow:\n{rendered_user_inputs}")
+        sections.append(
+            "Resume the workflow from the latest relevant specialist context. "
+            "Do not ask again for information that the user already provided unless it is still missing or contradictory."
+        )
+        return "\n\n".join(sections)
+
+    def _resolve_handoff_user_input(
+        self,
+        *,
+        signal_state: HandoffHilSignalState,
+        state: _TeamTraceState,
+        user_input_provider: UserInputProvider | None,
+    ) -> tuple[str, str, str | None]:
+        prompt = (signal_state.prompt or "").strip()
+        requesting_agent = signal_state.actor_name
+        if not prompt:
+            raise FtryCliError("Handoff Human in the Loop requested user input without a visible question.")
+        if user_input_provider is None:
+            raise FtryCliError(
+                f"Team `{self.name}` is awaiting user input, but no interactive user input provider is configured."
+            )
+
+        state.flush_buffer()
+        state.last_visible_input = prompt
+        self._trace_request_info(prompt, state)
+        user_input = user_input_provider(prompt)
+        _trace_team_start(state.team_name, state.pattern, user_input)
+        state.last_visible_input = user_input
+        signal_state.clear()
+        return prompt, user_input, requesting_agent
+
     @classmethod
     def _create_pending_request(cls, event: Any, *, state: _TeamTraceState) -> _PendingTeamRequest:
-        HandoffAgentUserRequest = cls._load_handoff_request_type()
         request_id = getattr(event, "request_id", None)
         if not isinstance(request_id, str) or not request_id:
             raise FtryCliError("Team request_info event is missing a valid request identifier.")
@@ -424,24 +516,14 @@ class Team:
         data = getattr(event, "data", None)
         state.flush_buffer()
 
-        if isinstance(data, TeamAgentUserInputRequest):
-            prompt = data.prompt
+        if bool(getattr(data, "user_input_request", False)):
+            prompt = cls._extract_request_prompt(data)
             state.last_visible_input = prompt
             cls._trace_request_info(prompt, state)
             return _PendingTeamRequest(
                 request_id=request_id,
                 prompt=prompt,
-                build_response=lambda user_input: user_input,
-            )
-
-        if isinstance(data, HandoffAgentUserRequest):
-            prompt = cls._extract_request_prompt(getattr(data, "agent_response", None))
-            state.last_visible_input = prompt
-            cls._trace_request_info(prompt, state)
-            return _PendingTeamRequest(
-                request_id=request_id,
-                prompt=prompt,
-                build_response=lambda user_input, request=data: request.create_response(user_input),
+                build_response=lambda user_input: type(data).from_text(user_input),
             )
 
         raise FtryCliError(
@@ -630,14 +712,11 @@ class Team:
         )
 
     @staticmethod
-    def _select_handoff_start_agent(agents: Sequence[Any]) -> Any:
-        for agent in agents:
-            name = getattr(agent, "name", "")
-            description = getattr(agent, "description", "")
-            instructions = getattr(agent, "instructions", "")
-            analysis_text = f"{name} {description} {instructions}".lower()
-            if Team._contains_any(analysis_text, HANDOFF_START_HINTS):
-                return agent
+    def _select_handoff_start_agent(agents: Sequence[Any], preferred_agent_name: str | None = None) -> Any:
+        if preferred_agent_name:
+            for agent in agents:
+                if getattr(agent, "name", None) == preferred_agent_name:
+                    return agent
         return agents[0]
 
     @staticmethod
@@ -673,7 +752,9 @@ class Team:
         participant_plans: Sequence[_PlannedTeamParticipant],
         extra_instructions: str | None,
         use_managed_participants: bool,
+        enforce_structured_output: bool = True,
         require_per_service_call_history_persistence: bool = False,
+        handoff_hil_signal_state: HandoffHilSignalState | None = None,
     ) -> tuple[list[Any], dict[str, str]]:
         participants: list[Any] = []
         author_name_map: dict[str, str] = {}
@@ -684,12 +765,16 @@ class Team:
             participant_factory = (
                 team_agent.create_managed_participant if use_managed_participants else team_agent.create_participant
             )
+            participant_kwargs: dict[str, Any] = {
+                "extra_instructions": extra_instructions,
+                "name_override": plan.internal_name,
+                "require_per_service_call_history_persistence": require_per_service_call_history_persistence,
+            }
+            if use_managed_participants:
+                participant_kwargs["enforce_structured_output"] = enforce_structured_output
+                participant_kwargs["handoff_hil_signal_state"] = handoff_hil_signal_state
             participants.append(
-                participant_factory(
-                    extra_instructions=extra_instructions,
-                    name_override=plan.internal_name,
-                    require_per_service_call_history_persistence=require_per_service_call_history_persistence,
-                )
+                participant_factory(**participant_kwargs)
             )
 
         return participants, author_name_map
@@ -699,33 +784,55 @@ class Team:
         *,
         participants: Sequence[Any],
         handoff_builder_type: Any,
+        handoff_hil_signal_state: HandoffHilSignalState,
+        preferred_start_agent_name: str | None = None,
     ) -> Any:
         handoff_builder = handoff_builder_type(name=self.name, participants=participants, description=self.description)
-        handoff_builder = handoff_builder.with_start_agent(self._select_handoff_start_agent(participants))
+        handoff_builder = handoff_builder.with_start_agent(
+            self._select_handoff_start_agent(participants, preferred_agent_name=preferred_start_agent_name)
+        )
+        handoff_builder = handoff_builder.with_autonomous_mode()
         max_turns = self.termination.max_turns
-        if max_turns is not None:
-            handoff_builder = handoff_builder.with_termination_condition(
-                lambda conversation, limit=max_turns: self._count_assistant_messages(conversation) >= limit
+        handoff_builder = handoff_builder.with_termination_condition(
+            lambda conversation, limit=max_turns, signal_state=handoff_hil_signal_state: (
+                signal_state.action is not None
+                or (limit is not None and self._count_assistant_messages(conversation) >= limit)
             )
-        return handoff_builder.build()
+        )
+        workflow = handoff_builder.build()
+        if hasattr(workflow, "__dict__"):
+            setattr(workflow, "handoff_hil_signal_state", handoff_hil_signal_state)
+        if hasattr(workflow, "kwargs") and isinstance(getattr(workflow, "kwargs"), dict):
+            workflow.kwargs["handoff_hil_signal_state"] = handoff_hil_signal_state
+        return workflow
 
-    async def _build_workflow(self, current_input: str) -> tuple[str, Any, Mapping[str, str]]:
+    async def _build_workflow(
+        self,
+        current_input: str,
+        *,
+        forced_pattern: str | None = None,
+        forced_handoff_start_agent: str | None = None,
+    ) -> tuple[str, Any, Mapping[str, str], HandoffHilSignalState | None]:
         rendered_instructions = self._render_instructions()
         participant_plans = self._build_participant_plans()
-        inference = await self._infer_pattern(
-            current_input=current_input,
-            rendered_instructions=rendered_instructions,
-            participant_plans=participant_plans,
-        )
-        pattern = inference.pattern
+        if forced_pattern is None:
+            inference = await self._infer_pattern(
+                current_input=current_input,
+                rendered_instructions=rendered_instructions,
+                participant_plans=participant_plans,
+            )
+            pattern = inference.pattern
+        else:
+            pattern = forced_pattern
         inject_team_context = pattern in TEAM_CONTEXT_PATTERNS or self.model is None
+        handoff_hil_signal_state = HandoffHilSignalState() if pattern == "handoff" else None
         participants, author_name_map = self._build_participants(
             participant_plans=participant_plans,
             extra_instructions=rendered_instructions if inject_team_context else None,
-            use_managed_participants=pattern in {"sequential", "group-chat", "magentic"},
-            # Handoff injects and filters internal tool calls; persisting around each
-            # service call can leak those mechanics into later turns.
-            require_per_service_call_history_persistence=False,
+            use_managed_participants=pattern != "concurrent",
+            enforce_structured_output=pattern != "handoff",
+            require_per_service_call_history_persistence=pattern == "handoff",
+            handoff_hil_signal_state=handoff_hil_signal_state,
         )
         SequentialBuilder, ConcurrentBuilder, HandoffBuilder, GroupChatBuilder, MagenticBuilder = (
             self._load_orchestration_builders()
@@ -736,7 +843,7 @@ class Team:
         if pattern in {"sequential", "concurrent"}:
             builder = {"sequential": SequentialBuilder, "concurrent": ConcurrentBuilder}[pattern]
             workflow_builder = builder(participants=participants, intermediate_outputs=True)
-            return pattern, workflow_builder.build(), author_name_map
+            return pattern, workflow_builder.build(), author_name_map, None
 
         if pattern == "handoff":
             return (
@@ -744,8 +851,11 @@ class Team:
                 self._build_handoff_workflow(
                     participants=participants,
                     handoff_builder_type=HandoffBuilder,
+                    handoff_hil_signal_state=handoff_hil_signal_state or HandoffHilSignalState(),
+                    preferred_start_agent_name=forced_handoff_start_agent,
                 ),
                 author_name_map,
+                handoff_hil_signal_state,
             )
 
         controller_agent = self._create_controller_agent(instructions=rendered_instructions)
@@ -761,6 +871,7 @@ class Team:
                 pattern,
                 workflow_builder.build(),
                 author_name_map,
+                None,
             )
 
         return (
@@ -773,6 +884,7 @@ class Team:
                 intermediate_outputs=True,
             ).build(),
             author_name_map,
+            None,
         )
 
     @staticmethod

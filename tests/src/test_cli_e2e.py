@@ -20,7 +20,63 @@ def _strip_ansi(text: str) -> str:
 def _write_stub_agent_framework(root: Path) -> None:
     package_dir = root / "agent_framework"
     package_dir.mkdir()
-    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+    (package_dir / "__init__.py").write_text(
+        textwrap.dedent(
+            """
+            class AgentResponse:
+                def __init__(self, *, messages=None, value=None, **kwargs):
+                    self.messages = messages or []
+                    self.value = value
+                    self.response_id = kwargs.get("response_id")
+                    self.agent_id = kwargs.get("agent_id")
+                    self.created_at = kwargs.get("created_at")
+                    self.usage_details = kwargs.get("usage_details")
+                    self.raw_representation = kwargs.get("raw_representation")
+                    self.additional_properties = kwargs.get("additional_properties")
+
+
+            class Content:
+                def __init__(self, type="text", *, text=None, id="content-id", additional_properties=None):
+                    self.type = type
+                    self.text = text
+                    self.id = id
+                    self.user_input_request = False
+                    self.additional_properties = additional_properties or {}
+
+                @classmethod
+                def from_text(cls, text, *, additional_properties=None, raw_representation=None):
+                    del raw_representation
+                    return cls(text=text, additional_properties=additional_properties)
+
+
+            class Message:
+                def __init__(self, role, contents=None, *, author_name=None, additional_properties=None):
+                    self.role = role
+                    self.contents = contents or []
+                    self.author_name = author_name
+                    self.additional_properties = additional_properties or {}
+                    self.text = " ".join(
+                        part for part in [
+                            content if isinstance(content, str) else getattr(content, "text", None)
+                            for content in self.contents
+                        ] if isinstance(part, str)
+                    )
+
+
+            class ResponseStream:
+                def __init__(self, stream, *, finalizer=None):
+                    self.stream = stream
+                    self.finalizer = finalizer
+
+
+            def agent_middleware(func):
+                func._middleware_type = "agent"
+                return func
+            """
+        ).strip()
+        + "\n",
+        encoding="utf-8",
+    )
     (package_dir / "openai.py").write_text(
         textwrap.dedent(
             """
@@ -51,11 +107,21 @@ def _write_stub_agent_framework(root: Path) -> None:
                     self.instructions = instructions
                     self.description = description
                     self.require_per_service_call_history_persistence = require_per_service_call_history_persistence
+                    self.default_options = {}
+                    self.middleware = []
+                    self.agent_middleware = []
+                    self._cached_agent_middleware_pipeline = None
 
                 def create_session(self):
                     return object()
 
                 async def run(self, prompt, *, options=None, **kwargs):
+                    effective_options = dict(self.default_options)
+                    if isinstance(options, dict):
+                        effective_options.update(options)
+                        options = effective_options
+                    elif effective_options:
+                        options = effective_options
                     if isinstance(options, dict) and "response_format" in options:
                         schema_name = options.get("response_format", {}).get("json_schema", {}).get("name")
                         if schema_name == "agent_turn_response":
@@ -71,11 +137,6 @@ def _write_stub_agent_framework(root: Path) -> None:
                             value={
                                 "workflow_type": "concurrent" if "concurrent workflow" in prompt.lower() else "magentic",
                                 "reason": "Stubbed workflow inference result.",
-                                "human_in_the_loop": {
-                                    "enabled": False,
-                                    "reason": "Stubbed workflows do not need user input in this end-to-end test.",
-                                    "agent_names": [],
-                                },
                             },
                         )
                     return Result(f"{self.name}:{prompt}")

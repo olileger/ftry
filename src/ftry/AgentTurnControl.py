@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any, Mapping
 
@@ -34,13 +35,15 @@ AGENT_TURN_RESPONSE_FORMAT = {
     },
 }
 AGENT_TURN_CONTROL_PROMPT = """<ConsoleInteractionContract>
-Tu dois repondre en respectant le schema JSON fourni par `response_format`.
+Quand tu produis une reponse visible a l'utilisateur, tu dois renvoyer uniquement un objet JSON de cette forme:
+{"status":"done|await_user_input","message":"texte visible"}
 
 Regles de controle:
 - Mets dans `message` uniquement le texte visible par l'utilisateur.
 - Mets `status` a `await_user_input` quand tu attends explicitement la prochaine reponse de l'utilisateur pour continuer.
 - Mets `status` a `done` quand ta reponse doit clore l'execution courante de l'agent.
 - N'ecris jamais de JSON, de schema, ni d'explication meta dans `message`.
+- Si tu dois utiliser un tool/framework tool pour deleguer ou faire un handoff, utilise ce tool normalement au lieu de produire cet objet JSON.
 </ConsoleInteractionContract>"""
 
 
@@ -56,6 +59,16 @@ class AgentTurnResponse:
 
 def parse_agent_turn_response(result: Any, *, error_subject: str) -> AgentTurnResponse:
     raw_value = getattr(result, "value", None)
+    if raw_value is None:
+        raw_text = getattr(result, "text", None)
+        if isinstance(raw_text, str) and raw_text.strip():
+            try:
+                parsed_value = json.loads(raw_text)
+            except json.JSONDecodeError as exc:
+                raise FtryCliError(
+                    f"{error_subject} response is missing the structured control payload required for console interaction."
+                ) from exc
+            raw_value = parsed_value
     if not isinstance(raw_value, Mapping):
         raise FtryCliError(
             f"{error_subject} response is missing the structured control payload required for console interaction."

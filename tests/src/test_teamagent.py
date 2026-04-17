@@ -111,6 +111,47 @@ class TeamAgentTests(unittest.TestCase):
         self.assertIsInstance(created_agent, FakeAgent)
         self.assertTrue(created_agent.require_per_service_call_history_persistence)
 
+    def test_create_managed_participant_enables_turn_control_contract_and_middleware(self) -> None:
+        reset_fakes()
+        agent = team_agent_module.TeamAgent(
+            self._make_agent_config(name="Researcher", description="Asks clarifying questions.", instructions="Research.")
+        )
+
+        with patch.dict(sys.modules, make_fake_agent_framework_modules(), clear=False):
+            created_agent = agent.create_managed_participant(name_override="Researcher-2")
+
+        self.assertIsInstance(created_agent, FakeAgent)
+        self.assertEqual(created_agent.name, "Researcher-2")
+        self.assertIn("ConsoleInteractionContract", created_agent.instructions)
+        self.assertEqual(
+            created_agent.default_options.get("response_format"),
+            team_agent_module.AGENT_TURN_RESPONSE_FORMAT,
+        )
+        self.assertEqual(len(created_agent.middleware), 1)
+        self.assertEqual(len(created_agent.agent_middleware), 1)
+        self.assertIsNone(created_agent._cached_agent_middleware_pipeline)
+
+    def test_create_managed_participant_can_skip_strict_response_format(self) -> None:
+        reset_fakes()
+        agent = team_agent_module.TeamAgent(self._make_agent_config(name="Router", instructions="Route requests."))
+        signal_state = team_agent_module.HandoffHilSignalState()
+
+        with patch.dict(sys.modules, make_fake_agent_framework_modules(), clear=False):
+            created_agent = agent.create_managed_participant(
+                name_override="Router-2",
+                enforce_structured_output=False,
+                handoff_hil_signal_state=signal_state,
+            )
+
+        self.assertNotIn("ConsoleInteractionContract", created_agent.instructions)
+        self.assertIn("HandoffInteractionContract", created_agent.instructions)
+        self.assertEqual(
+            {tool.name for tool in created_agent.default_options.get("tools", [])},
+            {"request_user_input", "final_answer"},
+        )
+        self.assertEqual(created_agent.middleware, [])
+        self.assertEqual(created_agent.agent_middleware, [])
+
 
 if __name__ == "__main__":
     unittest.main()
