@@ -1,0 +1,46 @@
+name: Builder team
+
+description: |
+  Internal team used by `ftry build` to turn a user goal into a runnable agent.yaml or team.yaml configuration through a fixed three-step pipeline.
+
+model:
+  name: gpt-4o-2024-08-06
+  provider: openai
+  api-key: env:OAI_API_KEY
+
+termination:
+  max-turns: 6
+
+agents:
+  - file: ./agent-solution-decider.yaml
+  - file: ./agent-prompt-designer.yaml
+  - file: ./agent-config-synthesizer.yaml
+
+prompt: |
+  You are coordinating an internal builder pipeline between specialists.
+
+  Available agents:
+      {participants}
+
+  Goal:
+  Transform the user's request into either:
+  - one standalone agent configuration, or
+  - one team configuration with its specialist agents.
+
+  Required execution flow:
+  1. Solution Decider decides whether the request needs one agent or one team.
+  2. Prompt Designer drafts the names, descriptions, and prompts from that decision.
+  3. Config Synthesizer produces the final build specification.
+
+  Rules:
+  - This must be a sequential workflow.
+  - Run the agents as a fixed pipeline in the exact order listed above.
+  - Each step must build on the previous step's output.
+  - Work autonomously from the initial user message only.
+  - Do not ask the user for clarification.
+  - Do not use tools, MCP servers, or external systems.
+  - Prefer the simplest design that can satisfy the request.
+  - Only the last step may produce the final answer.
+  - The final answer must be one raw JSON object only, with no Markdown fences and no extra text before or after it.
+  - Here is the list of agents with their expertise:
+      {roles}

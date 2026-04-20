@@ -5,20 +5,23 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sys
+from pathlib import Path
 from typing import Callable, Sequence, TextIO
 
+from .Builder import build_from_prompt
 from .StandaloneAgent import StandaloneAgent
 from .Team import (
     Team,
 )
 from .Tools import (
     FtryCliError,
+    _load_build_banner,
     _load_line_banner,
     _load_pop_banner,
 )
 
 
-MOCK_COMMANDS = ("build", "break", "land")
+MOCK_COMMANDS = ("break", "land")
 AGENT_INPUT_PROMPT = "You> "
 
 
@@ -32,12 +35,27 @@ def _run_line_command() -> int:
     return 0
 
 
-def _print_pop_banner(*, stream: TextIO | None = None) -> None:
+def _run_build_command(prompt: str, *, output_dir: str | None = None) -> int:
+    _print_build_banner()
+    created_files = build_from_prompt(prompt, output_dir=output_dir)
+    print("\n".join(str(path) for path in created_files))
+    return 0
+
+
+def _print_banner(banner_text: str, *, stream: TextIO | None = None) -> None:
     target_stream = sys.stderr if stream is None else stream
     if not getattr(target_stream, "isatty", lambda: False)():
         return
-    target_stream.write(f"{_load_pop_banner()}\n")
+    target_stream.write(f"{banner_text}\n")
     target_stream.flush()
+
+
+def _print_build_banner(*, stream: TextIO | None = None) -> None:
+    _print_banner(_load_build_banner(), stream=stream)
+
+
+def _print_pop_banner(*, stream: TextIO | None = None) -> None:
+    _print_banner(_load_pop_banner(), stream=stream)
 
 
 def _read_agent_follow_up_input(
@@ -82,6 +100,20 @@ def build_parser() -> argparse.ArgumentParser:
     for command in MOCK_COMMANDS:
         subparser = subparsers.add_parser(command, help=f"Mock {command} command.")
         subparser.set_defaults(handler=lambda args, command=command: _run_mock_command(command))
+
+    build_parser = subparsers.add_parser("build", help="Generate an agent or team YAML configuration from a prompt.")
+    build_parser.add_argument(
+        "-p",
+        "--prompt",
+        required=True,
+        help="Prompt describing what should be built.",
+    )
+    build_parser.add_argument(
+        "-o",
+        "--output-dir",
+        help="Directory where the generated YAML files should be written. Defaults to the current directory.",
+    )
+    build_parser.set_defaults(handler=lambda args: _run_build_command(args.prompt, output_dir=args.output_dir))
 
     line_parser = subparsers.add_parser("line", help='Display "First Try" as colored ASCII art.')
     line_parser.set_defaults(handler=lambda args: _run_line_command())

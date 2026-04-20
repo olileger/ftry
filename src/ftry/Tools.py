@@ -77,6 +77,10 @@ def _load_line_banner() -> str:
     return _load_ascii_banner("line.txt")
 
 
+def _load_build_banner() -> str:
+    return _load_ascii_banner("build.txt")
+
+
 def _load_pop_banner() -> str:
     return _load_ascii_banner("pop.txt")
 

@@ -6,7 +6,7 @@ Minimal CLI named `ftry`.
 
 ## Available commands
 
-For now, the commands are mocks, except for `line` and `pop`.
+For now, the commands are mocks, except for `build`, `line`, and `pop`.
 
 - `ftry build`
 - `ftry break`
@@ -14,22 +14,18 @@ For now, the commands are mocks, except for `line` and `pop`.
 - `ftry land`
 - `ftry line`
 
+The `ftry build` command takes a prompt with `-p`, uses an internal builder team to decide whether the request should become one agent or one team, then writes the generated YAML files in the current directory.
+
 Example:
 
 ```powershell
-ftry build
-```
-
-Output:
-
-```text
-build
+ftry build -p "Create an agent that drafts concise release notes from raw product updates."
 ```
 
 The `ftry line` command loads its output from `src\ftry\line.txt`. To change the visual output, simply edit that file.
 
 The `ftry pop` command loads either an agent (`-a`) or a team of agents (`-t`) from a YAML file, sends the prompt passed with `-p`, then displays the model response.
-In an interactive terminal, it plays a slightly longer neon ASCII `POP` skateboard animation before the run starts, loading the static `POP` banner from `src\ftry\pop.txt`, reusing the skateboard style from `src\ftry\line.txt`, and leaving the final frame visible on screen.
+In an interactive terminal, it prints the static `POP` banner before the run starts, loading it from `src\ftry\ascii-art\pop.txt`.
 For direct agent runs (`ftry pop -a`), `ftry` now keeps the same Agent Framework session across turns and lets the model decide, via a structured turn status, whether the conversation is done or whether it is waiting for the next user input.
 For team runs (`ftry pop -t`), `ftry` now infers both the orchestration type and the need for Human in the Loop `request_info` from the current user request, the team prompt, and the participating agent roles, then resumes supported Microsoft Agent Framework workflows when those request events are emitted.
 

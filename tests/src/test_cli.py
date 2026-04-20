@@ -14,15 +14,51 @@ class CliTests(unittest.TestCase):
         stdout = io.StringIO()
 
         with redirect_stdout(stdout):
-            mock_exit_code = cli._run_mock_command("build")
+            mock_exit_code = cli._run_mock_command("break")
             line_exit_code = cli._run_line_command()
 
         self.assertEqual(mock_exit_code, 0)
         self.assertEqual(line_exit_code, 0)
         rendered = stdout.getvalue()
-        self.assertIn("build", rendered)
+        self.assertIn("break", rendered)
         self.assertIn("-----", strip_ansi(rendered))
         self.assertIn("_____", strip_ansi(rendered))
+
+    def test_run_build_command_writes_created_paths(self) -> None:
+        stdout = io.StringIO()
+
+        with (
+            redirect_stdout(stdout),
+            patch(
+                "ftry.cli.build_from_prompt",
+                return_value=(
+                    cli.Path(r"C:\temp\agent-alpha.yaml"),
+                    cli.Path(r"C:\temp\team.yaml"),
+                ),
+            ) as build_from_prompt,
+            patch("ftry.cli._print_build_banner") as print_build_banner,
+        ):
+            exit_code = cli._run_build_command("Create a team", output_dir=r"C:\temp")
+
+        self.assertEqual(exit_code, 0)
+        print_build_banner.assert_called_once_with()
+        build_from_prompt.assert_called_once_with("Create a team", output_dir=r"C:\temp")
+        self.assertEqual(stdout.getvalue().splitlines(), [r"C:\temp\agent-alpha.yaml", r"C:\temp\team.yaml"])
+
+    def test_run_build_command_uses_default_output_root_when_no_directory_is_passed(self) -> None:
+        stdout = io.StringIO()
+
+        with (
+            redirect_stdout(stdout),
+            patch("ftry.cli.build_from_prompt", return_value=(cli.Path(r"C:\temp\output\agent\agent.yaml"),)) as build_from_prompt,
+            patch("ftry.cli._print_build_banner") as print_build_banner,
+        ):
+            exit_code = cli._run_build_command("Create an agent")
+
+        self.assertEqual(exit_code, 0)
+        print_build_banner.assert_called_once_with()
+        build_from_prompt.assert_called_once_with("Create an agent", output_dir=None)
+        self.assertEqual(stdout.getvalue().splitlines(), [r"C:\temp\output\agent\agent.yaml"])
 
     def test_run_pop_command_dispatches_agent_prompts(self) -> None:
         loaded_agent = Mock()
@@ -81,6 +117,13 @@ class CliTests(unittest.TestCase):
         self.assertIsNone(args.agent_file)
         self.assertEqual(args.prompt, "Bonjour")
 
+    def test_build_parser_parses_build_arguments(self) -> None:
+        args = cli.build_parser().parse_args(["build", "-p", "Create a billing assistant", "-o", r".\generated"])
+
+        self.assertEqual(args.command, "build")
+        self.assertEqual(args.prompt, "Create a billing assistant")
+        self.assertEqual(args.output_dir, r".\generated")
+
     def test_print_pop_banner_only_runs_in_a_tty(self) -> None:
         non_tty_stream = io.StringIO()
         cli._print_pop_banner(stream=non_tty_stream)
@@ -93,6 +136,20 @@ class CliTests(unittest.TestCase):
         plain_rendered = strip_ansi(rendered)
         self.assertIn("======", plain_rendered)
         self.assertIn("_____", plain_rendered)
+
+    def test_print_build_banner_only_runs_in_a_tty(self) -> None:
+        non_tty_stream = io.StringIO()
+        cli._print_build_banner(stream=non_tty_stream)
+        self.assertEqual(non_tty_stream.getvalue(), "")
+
+        tty_stream = FakeTtyStream()
+        cli._print_build_banner(stream=tty_stream)
+
+        rendered = tty_stream.getvalue()
+        plain_rendered = strip_ansi(rendered)
+        self.assertIn("----", plain_rendered)
+        self.assertIn("____", plain_rendered)
+        self.assertIn("| __ )", plain_rendered)
 
     def test_pop_rejects_team_file_passed_as_agent_file(self) -> None:
         stderr = io.StringIO()
