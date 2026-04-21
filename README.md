@@ -6,15 +6,11 @@ Minimal CLI named `ftry`.
 
 ## Available commands
 
-For now, the commands are mocks, except for `build`, `line`, and `pop`.
-
 - `ftry build`
-- `ftry break`
 - `ftry pop`
-- `ftry land`
 - `ftry line`
 
-The `ftry build` command takes a prompt with `-p`, uses an internal builder team to decide whether the request should become one agent or one team, then writes the generated YAML files in the current directory.
+The `ftry build` command takes a prompt with `-p`, uses an internal builder team to decide whether the request should become one agent or one team, then writes the generated YAML files under `.\output\<generated-name>\`.
 
 Example:
 

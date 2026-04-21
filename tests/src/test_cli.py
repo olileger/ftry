@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import unittest
 from contextlib import redirect_stdout, redirect_stderr
+from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
 
 from ftry import cli
@@ -10,19 +11,27 @@ from tests.src.testsupport import FakeTtyStream, SAMPLE_AGENT_FILE, SAMPLE_TEAM_
 
 
 class CliTests(unittest.TestCase):
-    def test_mock_and_line_commands_render_expected_output(self) -> None:
+    def test_line_command_renders_expected_output(self) -> None:
         stdout = io.StringIO()
 
         with redirect_stdout(stdout):
-            mock_exit_code = cli._run_mock_command("break")
             line_exit_code = cli._run_line_command()
 
-        self.assertEqual(mock_exit_code, 0)
         self.assertEqual(line_exit_code, 0)
         rendered = stdout.getvalue()
-        self.assertIn("break", rendered)
         self.assertIn("-----", strip_ansi(rendered))
         self.assertIn("_____", strip_ansi(rendered))
+
+    def test_removed_mock_commands_are_not_exposed_by_parser(self) -> None:
+        parser = cli.build_parser()
+        stderr = io.StringIO()
+
+        with redirect_stderr(stderr):
+            with self.assertRaises(SystemExit):
+                parser.parse_args(["break"])
+
+            with self.assertRaises(SystemExit):
+                parser.parse_args(["land"])
 
     def test_run_build_command_writes_created_paths(self) -> None:
         stdout = io.StringIO()
@@ -32,8 +41,8 @@ class CliTests(unittest.TestCase):
             patch(
                 "ftry.cli.build_from_prompt",
                 return_value=(
-                    cli.Path(r"C:\temp\agent-alpha.yaml"),
-                    cli.Path(r"C:\temp\team.yaml"),
+                    Path(r"C:\temp\agent-alpha.yaml"),
+                    Path(r"C:\temp\team.yaml"),
                 ),
             ) as build_from_prompt,
             patch("ftry.cli._print_build_banner") as print_build_banner,
@@ -50,7 +59,7 @@ class CliTests(unittest.TestCase):
 
         with (
             redirect_stdout(stdout),
-            patch("ftry.cli.build_from_prompt", return_value=(cli.Path(r"C:\temp\output\agent\agent.yaml"),)) as build_from_prompt,
+            patch("ftry.cli.build_from_prompt", return_value=(Path(r"C:\temp\output\agent\agent.yaml"),)) as build_from_prompt,
             patch("ftry.cli._print_build_banner") as print_build_banner,
         ):
             exit_code = cli._run_build_command("Create an agent")

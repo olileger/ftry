@@ -458,7 +458,7 @@ class CliEndToEndTests(unittest.TestCase):
                 env=env,
             )
 
-    def test_mock_and_line_commands_run_through_cli_subprocess(self) -> None:
+    def test_line_command_runs_through_cli_subprocess(self) -> None:
         line_result = self._run_cli("line")
         self.assertEqual(line_result.returncode, 0)
         self.assertIn("-----", _strip_ansi(line_result.stdout))

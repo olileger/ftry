@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sys
-from pathlib import Path
 from typing import Callable, Sequence, TextIO
 
 from .Builder import build_from_prompt
@@ -20,14 +19,7 @@ from .Tools import (
     _load_pop_banner,
 )
 
-
-MOCK_COMMANDS = ("break", "land")
 AGENT_INPUT_PROMPT = "You> "
-
-
-def _run_mock_command(command: str) -> int:
-    print(command)
-    return 0
 
 
 def _run_line_command() -> int:
@@ -97,10 +89,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="ftry", description="Mock CLI for ftry.")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    for command in MOCK_COMMANDS:
-        subparser = subparsers.add_parser(command, help=f"Mock {command} command.")
-        subparser.set_defaults(handler=lambda args, command=command: _run_mock_command(command))
-
     build_parser = subparsers.add_parser("build", help="Generate an agent or team YAML configuration from a prompt.")
     build_parser.add_argument(
         "-p",
@@ -118,7 +106,7 @@ def build_parser() -> argparse.ArgumentParser:
     line_parser = subparsers.add_parser("line", help='Display "First Try" as colored ASCII art.')
     line_parser.set_defaults(handler=lambda args: _run_line_command())
 
-    pop_parser = subparsers.add_parser("pop", help="Run an agent described in a YAML file.")
+    pop_parser = subparsers.add_parser("pop", help="Run an agent or team described in a YAML file.")
     pop_source_group = pop_parser.add_mutually_exclusive_group(required=True)
     pop_source_group.add_argument(
         "-a",

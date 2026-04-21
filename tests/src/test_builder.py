@@ -14,11 +14,19 @@ from ftry.Team import Team
 
 class BuilderTests(unittest.TestCase):
     def test_build_from_prompt_rejects_missing_or_non_directory_output_path(self) -> None:
+        spec = builder_module.BuildSpec(
+            kind=builder_module.BUILD_KIND_AGENT,
+            agent=builder_module._BuiltAgentSpec(
+                name="Writer",
+                description="Writes content.",
+                prompt="Write the content.",
+            ),
+        )
         with TemporaryDirectory() as temp_dir:
             file_path = Path(temp_dir) / "not-a-dir.txt"
             file_path.write_text("x", encoding="utf-8")
             with self.assertRaisesRegex(builder_module.FtryCliError, "not a directory"):
-                builder_module.build_from_prompt("Create something.", output_dir=file_path)
+                builder_module._resolve_build_output_dir(spec, output_dir=file_path)
 
     def test_parse_build_spec_output_accepts_fenced_json(self) -> None:
         spec = builder_module._parse_build_spec_output(
