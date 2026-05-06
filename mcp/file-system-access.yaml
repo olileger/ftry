@@ -1,0 +1,12 @@
+name: "File System Access"
+transport: "stdio"
+
+description: |
+  Accès pour créer et éditer des fichiers dans le répertoire courant.
+
+allowed-tools:
+  - "write"
+
+command: "touch"
+args:
+  - "{filename}"

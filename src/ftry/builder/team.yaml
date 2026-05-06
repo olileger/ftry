@@ -1,7 +1,7 @@
 name: Builder team
 
 description: |
-  Internal team used by `ftry build` to turn a user goal into a runnable agent.yaml or team.yaml configuration through a fixed three-step pipeline.
+  Internal team used by `ftry build` to turn a user goal into a runnable agent.yaml or team.yaml configuration through a fixed four-step pipeline.
 
 model:
   name: gpt-4o-2024-08-06
@@ -13,6 +13,7 @@ termination:
 
 agents:
   - file: ./agent-solution-decider.yaml
+  - file: ./agent-mcp-designer.yaml
   - file: ./agent-prompt-designer.yaml
   - file: ./agent-config-synthesizer.yaml
 
@@ -29,8 +30,9 @@ prompt: |
 
   Required execution flow:
   1. Solution Decider decides whether the request needs one agent or one team.
-  2. Prompt Designer drafts the names, descriptions, and prompts from that decision.
-  3. Config Synthesizer produces the final build specification.
+  2. MCP Designer infers which MCP descriptors should be reused or created.
+  3. Prompt Designer drafts the names, descriptions, and prompts from the design and MCP needs.
+  4. Config Synthesizer produces the final build specification.
 
   Rules:
   - This must be a sequential workflow.
@@ -38,8 +40,11 @@ prompt: |
   - Each step must build on the previous step's output.
   - Work autonomously from the initial user message only.
   - Do not ask the user for clarification.
-  - Do not use tools, MCP servers, or external systems.
+  - Do not call tools, MCP servers, or external systems.
   - Prefer the simplest design that can satisfy the request.
+  - Reuse existing MCP descriptors listed in the input whenever possible.
+  - Create a new MCP descriptor only when the user request clearly requires a capability not covered by the existing catalog.
+  - MCP descriptors must stay declarative and safe: no clear-text secrets, no opaque shell tricks, and prefer valid stubs over guessed operational details.
   - Only the last step may produce the final answer.
   - The final answer must be one raw JSON object only, with no Markdown fences and no extra text before or after it.
   - Here is the list of agents with their expertise:

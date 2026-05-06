@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
+from .Mcp import Mcp
 from .Tools import (
     FtryCliError,
     _load_dotenv_for_config,
@@ -49,6 +51,7 @@ class AgentConfig:
     instructions: str
     model: AgentModelConfig
     description: str | None = None
+    mcp_servers: tuple[str, ...] = ()
 
     @classmethod
     def from_mapping(cls, config: Mapping[str, Any], *, config_kind: str = "agent") -> AgentConfig:
@@ -59,6 +62,7 @@ class AgentConfig:
             description=_require_optional_string(config.get("description"), "description", config_kind),
             instructions=_require_non_empty_string(config.get("prompt"), "prompt", config_kind),
             model=model,
+            mcp_servers=Mcp.parse_server_names(config.get("mcp"), field_name="mcp", config_kind=config_kind),
         )
 
     @classmethod
@@ -112,12 +116,14 @@ class Agent(ABC):
         extra_instructions: str | None = None,
         name_override: str | None = None,
         require_per_service_call_history_persistence: bool = False,
+        tools: Sequence[Any] | None = None,
     ) -> Any:
         self._require_supported_provider()
         return self._create_openai_participant(
             rendered_instructions=self._build_participant_instructions(extra_instructions),
             name_override=name_override,
             require_per_service_call_history_persistence=require_per_service_call_history_persistence,
+            tools=tools,
         )
 
     @abstractmethod
@@ -143,6 +149,7 @@ class Agent(ABC):
         rendered_instructions: str,
         name_override: str | None = None,
         require_per_service_call_history_persistence: bool = False,
+        tools: Sequence[Any] | None = None,
     ) -> Any:
         try:
             from agent_framework.openai import OpenAIChatCompletionClient
@@ -159,5 +166,11 @@ class Agent(ABC):
             name=name_override or _sanitize_agent_name(self.name),
             description=self.description,
             instructions=rendered_instructions,
+            tools=list(tools) if tools else None,
             require_per_service_call_history_persistence=require_per_service_call_history_persistence,
         )
+
+    async def _enter_mcp_tools(self, exit_stack: AsyncExitStack) -> tuple[Any, ...]:
+        if not self.config.mcp_servers:
+            return ()
+        return await Mcp.open_tools(Mcp.resolve(self.config.mcp_servers), exit_stack=exit_stack)

@@ -65,6 +65,7 @@ class TeamAgent(Agent):
         require_per_service_call_history_persistence: bool = False,
         enforce_structured_output: bool = True,
         handoff_hil_signal_state: HandoffHilSignalState | None = None,
+        tools: Any = None,
     ) -> Any:
         self._require_supported_provider()
         rendered_instructions = (
@@ -78,6 +79,7 @@ class TeamAgent(Agent):
             rendered_instructions=rendered_instructions,
             name_override=name_override,
             require_per_service_call_history_persistence=require_per_service_call_history_persistence,
+            tools=tools,
         )
         _configure_team_managed_participant(
             participant,

@@ -41,11 +41,13 @@ class FakeAgent:
         instructions: str,
         description: str | None = None,
         require_per_service_call_history_persistence: bool = False,
+        tools: object | None = None,
     ) -> None:
         self.name = name
         self.instructions = instructions
         self.description = description
         self.require_per_service_call_history_persistence = require_per_service_call_history_persistence
+        self.tools = tools
         self.default_options: dict[str, object] = {}
         self.middleware: list[object] = []
         self.agent_middleware: list[object] = []
@@ -109,6 +111,43 @@ class FakeTool:
         return self.func(*args, **kwargs)
 
 
+class _FakeMcpToolBase:
+    created_tools: list["_FakeMcpToolBase"] = []
+    entered_tools: list["_FakeMcpToolBase"] = []
+    closed_tools: list["_FakeMcpToolBase"] = []
+
+    def __init__(self, **kwargs: object) -> None:
+        self.kwargs = kwargs
+        self.name = kwargs.get("name")
+        self.description = kwargs.get("description")
+        self.closed = False
+        type(self).created_tools.append(self)
+
+    async def __aenter__(self) -> "_FakeMcpToolBase":
+        type(self).entered_tools.append(self)
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> bool:
+        await self.close()
+        return False
+
+    async def close(self) -> None:
+        self.closed = True
+        type(self).closed_tools.append(self)
+
+
+class FakeMCPStdioTool(_FakeMcpToolBase):
+    pass
+
+
+class FakeMCPStreamableHTTPTool(_FakeMcpToolBase):
+    pass
+
+
+class FakeMCPWebsocketTool(_FakeMcpToolBase):
+    pass
+
+
 class FakeOpenAIChatCompletionClient:
     last_model: str | None = None
     last_api_key: str | None = None
@@ -124,12 +163,14 @@ class FakeOpenAIChatCompletionClient:
         name: str,
         instructions: str,
         description: str | None = None,
+        tools: object | None = None,
         require_per_service_call_history_persistence: bool = False,
     ) -> FakeAgent:
         agent = FakeAgent(
             name=name,
             instructions=instructions,
             description=description,
+            tools=tools,
             require_per_service_call_history_persistence=require_per_service_call_history_persistence,
         )
         FakeOpenAIChatCompletionClient.last_agent = agent
@@ -714,6 +755,9 @@ def make_fake_agent_framework_modules() -> dict[str, types.ModuleType]:
     )
     fake_package.AgentResponse = FakeAgentResponse
     fake_package.Content = FakeContent
+    fake_package.MCPStdioTool = FakeMCPStdioTool
+    fake_package.MCPStreamableHTTPTool = FakeMCPStreamableHTTPTool
+    fake_package.MCPWebsocketTool = FakeMCPWebsocketTool
     fake_package.Message = FakeMessage
     fake_package.ResponseStream = FakeResponseStream
     fake_package.agent_middleware = fake_agent_middleware
@@ -728,10 +772,12 @@ def make_fake_agent_framework_modules() -> dict[str, types.ModuleType]:
     fake_orchestrations_module.HandoffAgentUserRequest = FakeHandoffAgentUserRequest
     fake_orchestrations_module.HandoffBuilder = FakeHandoffBuilder
     fake_orchestrations_module.MagenticBuilder = FakeMagenticBuilder
+    fake_mcp_module = types.ModuleType("mcp")
     return {
         "agent_framework": fake_package,
         "agent_framework.openai": fake_openai_module,
         "agent_framework.orchestrations": fake_orchestrations_module,
+        "mcp": fake_mcp_module,
     }
 
 
@@ -745,6 +791,15 @@ def reset_fakes() -> None:
     FakeOpenAIChatCompletionClient.last_model = None
     FakeOpenAIChatCompletionClient.last_api_key = None
     FakeOpenAIChatCompletionClient.last_agent = None
+    FakeMCPStdioTool.created_tools = []
+    FakeMCPStdioTool.entered_tools = []
+    FakeMCPStdioTool.closed_tools = []
+    FakeMCPStreamableHTTPTool.created_tools = []
+    FakeMCPStreamableHTTPTool.entered_tools = []
+    FakeMCPStreamableHTTPTool.closed_tools = []
+    FakeMCPWebsocketTool.created_tools = []
+    FakeMCPWebsocketTool.entered_tools = []
+    FakeMCPWebsocketTool.closed_tools = []
     FakeWorkflow.last_prompt = None
     FakeWorkflow.last_responses = None
     FakeWorkflow.run_calls = []

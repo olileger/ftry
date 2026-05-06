@@ -18,6 +18,7 @@ from tests.src.testsupport import (
     FakeContent,
     FakeGroupChatBuilder,
     FakeHandoffBuilder,
+    FakeMCPStdioTool,
     FakeMagenticBuilder,
     FakeOpenAIChatCompletionClient,
     FakeSequentialBuilder,
@@ -135,6 +136,7 @@ class TeamTests(unittest.TestCase):
     def test_from_mapping_and_config_property_expose_parsed_team_config(self) -> None:
         raw_config = {
             "name": "Inline Team",
+            "mcp": ["shared-files"],
             "agents": [
                 {
                     "name": "Inline Agent",
@@ -143,6 +145,7 @@ class TeamTests(unittest.TestCase):
                         "provider": "openai",
                         "api-key": "env:OAI_API_KEY",
                     },
+                    "mcp": ["local-files"],
                     "prompt": "Handle the request.",
                 }
             ],
@@ -155,6 +158,8 @@ class TeamTests(unittest.TestCase):
         self.assertEqual(team.config.name, "Inline Team")
         self.assertEqual(team.config.instructions, "Coordinate the work.")
         self.assertEqual(team.config.agents[0].name, "Inline Agent")
+        self.assertEqual(team.config.mcp_servers, ("shared-files",))
+        self.assertEqual(team.config.agents[0].mcp_servers, ("shared-files", "local-files"))
 
     def test_team_loader_and_inference_helpers_cover_string_file_refs_missing_defaults_and_fallbacks(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -202,6 +207,95 @@ class TeamTests(unittest.TestCase):
             team_module.Team._select_handoff_start_agent([first_agent, second_agent], preferred_agent_name="Beta"),
             second_agent,
         )
+
+    def test_team_loader_allows_file_refs_with_optional_mcp_overrides(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            agent_file = temp_path / "agent.yaml"
+            agent_file.write_text(
+                "\n".join(
+                    [
+                        "name: File Agent",
+                        "model:",
+                        "  name: gpt-4o",
+                        "  provider: openai",
+                        "  api-key: env:OAI_API_KEY",
+                        "mcp:",
+                        '  - "base-files"',
+                        "prompt: |",
+                        "  Work from file.",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            with patch.dict(os.environ, {"OAI_API_KEY": "secret-key"}, clear=False):
+                loaded_agent = team_module.Team._load_agent_config(
+                    {"file": f".\\{agent_file.name}", "mcp": ["local-files"]},
+                    team_dir=temp_path,
+                    shared_mcp_servers=("shared-files",),
+                )
+
+        self.assertEqual(loaded_agent.name, "File Agent")
+        self.assertEqual(loaded_agent.mcp_servers, ("shared-files", "base-files", "local-files"))
+
+    def test_build_workflow_with_resources_attaches_mcp_tools_to_participants(self) -> None:
+        reset_fakes()
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            registry_dir = temp_path / "mcp"
+            registry_dir.mkdir()
+            (registry_dir / "shared-files.yaml").write_text(
+                "\n".join(
+                    [
+                        'name: "shared-files"',
+                        'transport: "stdio"',
+                        'command: "uvx"',
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            team = self._make_team(
+                self._make_agent_config(name="Researcher"),
+                self._make_agent_config(name="Writer"),
+                name="MCP Team",
+            )
+            team = team_module.Team(
+                team_module.TeamConfig(
+                    name=team.name,
+                    description=team.description,
+                    instructions=team.instructions,
+                    agents=tuple(
+                        team_module.AgentConfig(
+                            name=agent.name,
+                            description=agent.description,
+                            instructions=agent.instructions,
+                            model=agent.model,
+                            mcp_servers=("shared-files",),
+                        )
+                        for agent in team.agents
+                    ),
+                    termination=team.termination,
+                )
+            )
+
+            async def build_workflow() -> None:
+                with patch.dict(sys.modules, make_fake_agent_framework_modules(), clear=False):
+                    pattern, workflow, _, _, resources = await team._build_workflow_with_resources(
+                        "Analyse this request.",
+                        forced_pattern="sequential",
+                    )
+                    self.assertEqual(pattern, "sequential")
+                    participants = workflow.kwargs["participants"]
+                    self.assertEqual(len(participants[0].tools), 1)
+                    self.assertEqual(participants[0].tools[0].name, "shared-files")
+                    await resources.aclose()
+
+            with patch("ftry.Mcp.Path.cwd", return_value=temp_path):
+                asyncio.run(build_workflow())
+
+        self.assertEqual(len(FakeMCPStdioTool.entered_tools), 2)
+        self.assertEqual(len(FakeMCPStdioTool.closed_tools), 2)
 
     def test_team_from_file_validates_nominal_and_error_cases(self) -> None:
         with TemporaryDirectory() as temp_dir:

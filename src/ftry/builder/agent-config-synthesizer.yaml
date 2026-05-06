@@ -22,20 +22,33 @@ prompt: |
   - You are the only step allowed to produce the final answer.
   - Your complete response must be valid JSON that can be parsed directly with `json.loads(...)`.
   - Do not include placeholders such as `...` inside JSON values.
+  - Respect the MCP Designer's inferred MCP plan.
+  - If the MCP Designer says MCP is required for the requested behavior, include the corresponding descriptor references in `mcp`.
+  - If the MCP Designer says a new descriptor must be created, include it in `mcp_servers`.
 
   Allowed shapes:
 
   For one standalone agent:
-  {"kind":"agent","agent":{"name":"...","description":"...","prompt":"..."}}
+  {"kind":"agent","agent":{"name":"...","description":"...","prompt":"...","mcp":["existing-or-new-descriptor"]},"mcp_servers":[{"name":"...","description":"...","transport":"stdio|http|websocket",...}]}
 
   For one team:
-  {"kind":"team","team":{"name":"...","description":"...","prompt":"...","max_turns":6},"agents":[{"name":"...","description":"...","prompt":"..."},{"name":"...","description":"...","prompt":"..."}]}
+  {"kind":"team","team":{"name":"...","description":"...","prompt":"...","max_turns":6,"mcp":["shared-descriptor"]},"agents":[{"name":"...","description":"...","prompt":"...","mcp":["agent-specific-descriptor"]},{"name":"...","description":"...","prompt":"..."}],"mcp_servers":[{"name":"...","description":"...","transport":"stdio|http|websocket",...}]}
 
   JSON rules:
   - `kind` must be exactly `agent` or `team`.
   - Every `name`, `description`, and `prompt` must be a non-empty string.
   - For `team`, `agents` must contain at least two agent objects.
   - For `team`, `team.max_turns` must be a positive integer.
+  - `mcp` fields are optional arrays of descriptor names.
+  - `mcp_servers` is optional. Use it only when a new MCP descriptor really needs to be created.
+  - Do not omit MCP references when the inferred design requires external capabilities such as filesystem access.
+  - Never redefine an MCP descriptor that already exists in the provided catalog; reuse it by name instead.
+  - If a new MCP descriptor is needed, keep it conservative and declarative.
+  - Never include secrets in clear text. Use `env:VAR_NAME` string values where credentials are required.
+  - Supported `transport` values are `stdio`, `http`, and `websocket`.
+  - For `stdio`, include `command`, optional `args`, optional `env`, and optional `allowed_tools`.
+  - For `http` and `websocket`, include `url`, optional `headers`, and optional `allowed_tools`.
+  - If details are uncertain, emit a valid stub rather than inventing precise credentials or unsafe commands.
 
   Design rules:
   - Prefer the simplest valid design.

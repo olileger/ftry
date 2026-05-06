@@ -15,6 +15,7 @@ import ftry.Agent as agent_module
 import ftry.StandaloneAgent as standalone_agent_module
 from tests.src.testsupport import (
     FakeAgent,
+    FakeMCPStdioTool,
     FakeOpenAIChatCompletionClient,
     FakeResult,
     SAMPLE_AGENT_FILE,
@@ -69,6 +70,7 @@ class StandaloneAgentTests(unittest.TestCase):
                     "provider": "openai",
                     "api-key": "secret",
                 },
+                "mcp": ["file-system"],
                 "prompt": "Work inline.",
             },
             config_kind="team agent",
@@ -78,6 +80,7 @@ class StandaloneAgentTests(unittest.TestCase):
         self.assertEqual(agent.description, "Inline specialist.")
         self.assertEqual(agent.instructions, "Work inline.")
         self.assertEqual(agent.model.name, "gpt-4o")
+        self.assertEqual(agent.config.mcp_servers, ("file-system",))
 
     def test_from_file_validates_nominal_and_error_cases(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -147,6 +150,50 @@ class StandaloneAgentTests(unittest.TestCase):
         plain_stderr = strip_ansi(stderr.getvalue())
         self.assertIn("AGENT Poete | input:", plain_stderr)
         self.assertIn("AGENT Poete | final-output:", plain_stderr)
+
+    def test_run_attaches_and_closes_mcp_tools_from_current_registry(self) -> None:
+        reset_fakes()
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            registry_dir = temp_path / "mcp"
+            registry_dir.mkdir()
+            (registry_dir / "file-system.yaml").write_text(
+                "\n".join(
+                    [
+                        'name: "file-system"',
+                        'transport: "stdio"',
+                        'command: "uvx"',
+                        "args:",
+                        '  - "mcp-server-filesystem"',
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            agent = standalone_agent_module.StandaloneAgent.from_mapping(
+                {
+                    "name": "Workspace Agent",
+                    "model": {
+                        "name": "gpt-4o",
+                        "provider": "openai",
+                        "api-key": "secret",
+                    },
+                    "mcp": ["file-system"],
+                    "prompt": "Inspect files.",
+                }
+            )
+
+            with (
+                patch.dict(sys.modules, make_fake_agent_framework_modules(), clear=False),
+                patch("ftry.Mcp.Path.cwd", return_value=temp_path),
+            ):
+                output = asyncio.run(agent.run("List the files"))
+
+        self.assertEqual(output, "Poeme genere")
+        self.assertIsNotNone(FakeOpenAIChatCompletionClient.last_agent)
+        self.assertEqual(len(FakeOpenAIChatCompletionClient.last_agent.tools), 1)
+        self.assertEqual(FakeOpenAIChatCompletionClient.last_agent.tools[0].name, "file-system")
+        self.assertEqual(len(FakeMCPStdioTool.entered_tools), 1)
+        self.assertEqual(len(FakeMCPStdioTool.closed_tools), 1)
 
     def test_run_loops_when_agent_awaits_user_input(self) -> None:
         reset_fakes()

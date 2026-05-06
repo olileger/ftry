@@ -105,6 +105,7 @@ class TeamAgentTests(unittest.TestCase):
             created_agent = agent.create_participant(
                 extra_instructions="Shared context",
                 name_override="Runner-2",
+                tools=("tool-a",),
             )
 
         self.assertIsInstance(created_agent, FakeAgent)
@@ -112,6 +113,7 @@ class TeamAgentTests(unittest.TestCase):
         self.assertIn("<TeamContext>", created_agent.instructions)
         self.assertIn("Shared context", created_agent.instructions)
         self.assertNotIn("ConsoleInteractionContract", created_agent.instructions)
+        self.assertEqual(created_agent.tools, ["tool-a"])
 
     def test_create_participant_forwards_history_persistence_flag(self) -> None:
         reset_fakes()

@@ -34,6 +34,7 @@ class AgentTests(unittest.TestCase):
                     "provider": "openai",
                     "api-key": "secret",
                 },
+                "mcp": ["file-system", "github"],
                 "prompt": "Work inline.",
             },
             config_kind="team agent",
@@ -43,6 +44,7 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(config.description, "Inline specialist.")
         self.assertEqual(config.instructions, "Work inline.")
         self.assertEqual(config.model.name, "gpt-4o")
+        self.assertEqual(config.mcp_servers, ("file-system", "github"))
 
     def test_agent_is_abstract(self) -> None:
         with self.assertRaises(TypeError):

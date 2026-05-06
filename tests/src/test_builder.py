@@ -13,6 +13,16 @@ from ftry.Team import Team
 
 
 class BuilderTests(unittest.TestCase):
+    def test_internal_builder_team_includes_mcp_designer_step(self) -> None:
+        with patch.dict(os.environ, {"OAI_API_KEY": "secret-key"}, clear=False):
+            builder_team = Team.from_file(builder_module.INTERNAL_BUILDER_TEAM_FILE)
+
+        self.assertEqual(builder_team.name, "Builder team")
+        self.assertEqual(
+            tuple(agent.name for agent in builder_team.config.agents),
+            ("Solution Decider", "MCP Designer", "Prompt Designer", "Config Synthesizer"),
+        )
+
     def test_build_from_prompt_rejects_missing_or_non_directory_output_path(self) -> None:
         spec = builder_module.BuildSpec(
             kind=builder_module.BUILD_KIND_AGENT,
@@ -31,7 +41,7 @@ class BuilderTests(unittest.TestCase):
     def test_parse_build_spec_output_accepts_fenced_json(self) -> None:
         spec = builder_module._parse_build_spec_output(
             """```json
-            {"kind":"agent","agent":{"name":"Writer","description":"Writes short copy.","prompt":"Write the requested copy."}}
+            {"kind":"agent","agent":{"name":"Writer","description":"Writes short copy.","prompt":"Write the requested copy.","mcp":["file-system"]}}
             ```"""
         )
 
@@ -39,6 +49,7 @@ class BuilderTests(unittest.TestCase):
         assert spec.agent is not None
         self.assertEqual(spec.agent.name, "Writer")
         self.assertEqual(spec.agent.prompt, "Write the requested copy.")
+        self.assertEqual(spec.agent.mcp_servers, ("file-system",))
         self.assertEqual(builder_module._require_optional_output_text(None, "agent.description"), None)
 
     def test_parse_build_spec_output_rejects_invalid_shapes(self) -> None:
@@ -66,6 +77,11 @@ class BuilderTests(unittest.TestCase):
                 '{"kind":"team","team":{"name":"Team","description":"Desc","prompt":"Prompt","max_turns":4},"agents":[]}'
             )
 
+        with self.assertRaisesRegex(builder_module.FtryCliError, "supported `mcp_servers\\[\\].transport`"):
+            builder_module._parse_build_spec_output(
+                '{"kind":"agent","agent":{"name":"Writer","description":"Desc","prompt":"Prompt"},"mcp_servers":[{"name":"x","transport":"tcp"}]}'
+            )
+
     def test_build_from_prompt_writes_agent_yaml_and_validates_it(self) -> None:
         with TemporaryDirectory() as temp_dir, patch.dict(os.environ, {"OAI_API_KEY": "secret-key"}, clear=False):
             temp_path = Path(temp_dir)
@@ -78,17 +94,30 @@ class BuilderTests(unittest.TestCase):
                             "name": "Release Writer",
                             "description": "Writes short release updates.",
                             "prompt": "Write a concise release note from the user's request.",
+                            "mcp": ["file-system"],
                         },
+                        "mcp_servers": [
+                            {
+                                "name": "file-system",
+                                "description": "Local file access.",
+                                "transport": "stdio",
+                                "command": "uvx",
+                                "args": ["mcp-server-filesystem"],
+                            }
+                        ],
                     }
                 ),
             ):
-                created_files = builder_module.build_from_prompt("Create a release note agent.", output_dir=temp_path)
+                with patch("ftry.Builder.Path.cwd", return_value=temp_path):
+                    created_files = builder_module.build_from_prompt("Create a release note agent.", output_dir=temp_path)
 
             agent_output_dir = temp_path / "release-writer"
-            self.assertEqual(created_files, (agent_output_dir / "agent.yaml",))
+            self.assertEqual(created_files, (agent_output_dir / "agent.yaml", temp_path / "mcp" / "file-system.yaml"))
             rendered_agent = (agent_output_dir / "agent.yaml").read_text(encoding="utf-8")
             self.assertIn('name: "Release Writer"', rendered_agent)
+            self.assertIn('  - "file-system"', rendered_agent)
             self.assertIn("prompt: |", rendered_agent)
+            self.assertTrue((temp_path / "mcp" / "file-system.yaml").is_file())
             self.assertEqual(StandaloneAgent.from_file(agent_output_dir / "agent.yaml").name, "Release Writer")
 
     def test_build_from_prompt_writes_team_yaml_and_agent_files(self) -> None:
@@ -104,12 +133,14 @@ class BuilderTests(unittest.TestCase):
                             "description": "Coordinates a launch brief.",
                             "prompt": "Use {participants} and {roles} to build a lightweight launch brief.",
                             "max_turns": 5,
+                            "mcp": ["shared-files"],
                         },
                         "agents": [
                             {
                                 "name": "Scope Lead",
                                 "description": "Keeps the scope realistic.",
                                 "prompt": "Define the smallest useful scope.",
+                                "mcp": ["scope-search"],
                             },
                             {
                                 "name": "Risk Lead",
@@ -117,17 +148,34 @@ class BuilderTests(unittest.TestCase):
                                 "prompt": "Identify the main delivery risks.",
                             },
                         ],
+                        "mcp_servers": [
+                            {
+                                "name": "shared-files",
+                                "transport": "stdio",
+                                "command": "uvx",
+                            },
+                            {
+                                "name": "scope-search",
+                                "transport": "http",
+                                "url": "https://example.com/mcp",
+                            },
+                        ],
                     }
                 ),
             ):
-                created_files = builder_module.build_from_prompt("Build a launch team.", output_dir=temp_path)
+                with patch("ftry.Builder.Path.cwd", return_value=temp_path):
+                    created_files = builder_module.build_from_prompt("Build a launch team.", output_dir=temp_path)
 
             team_output_dir = temp_path / "feature-launch-team"
             self.assertEqual(created_files[0].name, "agent-scope-lead.yaml")
             self.assertEqual(created_files[1].name, "agent-risk-lead.yaml")
             self.assertEqual(created_files[2].name, "team.yaml")
+            self.assertEqual(created_files[3].name, "shared-files.yaml")
+            self.assertEqual(created_files[4].name, "scope-search.yaml")
             rendered_team = (team_output_dir / "team.yaml").read_text(encoding="utf-8")
             self.assertIn("max-turns: 5", rendered_team)
+            self.assertIn('  - "shared-files"', rendered_team)
+            self.assertIn('      - "scope-search"', rendered_team)
             self.assertIn("  - file: ./agent-scope-lead.yaml", rendered_team)
             self.assertEqual(Team.from_file(team_output_dir / "team.yaml").name, "Feature Launch team")
 
@@ -225,6 +273,66 @@ class BuilderTests(unittest.TestCase):
             self.assertEqual(target_dir, root_dir / "launch-squad")
             self.assertTrue(root_dir.is_dir())
             self.assertTrue(target_dir.is_dir())
+
+    def test_build_from_prompt_rejects_unknown_mcp_references(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            with patch(
+                "ftry.Builder._run_builder_team",
+                return_value=json.dumps(
+                    {
+                        "kind": "agent",
+                        "agent": {
+                            "name": "Writer",
+                            "description": "Writes content.",
+                            "prompt": "Write the content.",
+                            "mcp": ["missing-descriptor"],
+                        },
+                    }
+                ),
+            ):
+                with self.assertRaisesRegex(builder_module.FtryCliError, "unknown MCP descriptors"):
+                    builder_module.build_from_prompt("Create an MCP-aware agent.", output_dir=temp_dir)
+
+    def test_build_from_prompt_rejects_recreating_existing_mcp_descriptor(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            registry_dir = temp_path / "mcp"
+            registry_dir.mkdir()
+            (registry_dir / "file-system.yaml").write_text(
+                "\n".join(
+                    [
+                        'name: "file-system"',
+                        'transport: "stdio"',
+                        'command: "uvx"',
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            with (
+                patch("ftry.Builder.Path.cwd", return_value=temp_path),
+                patch(
+                    "ftry.Builder._run_builder_team",
+                    return_value=json.dumps(
+                        {
+                            "kind": "agent",
+                            "agent": {
+                                "name": "Writer",
+                                "description": "Writes content.",
+                                "prompt": "Write the content.",
+                            },
+                            "mcp_servers": [
+                                {
+                                    "name": "file-system",
+                                    "transport": "stdio",
+                                    "command": "uvx",
+                                }
+                            ],
+                        }
+                    ),
+                ),
+            ):
+                with self.assertRaisesRegex(builder_module.FtryCliError, "attempted to recreate"):
+                    builder_module.build_from_prompt("Create an agent.", output_dir=temp_path / "output")
 
 
 if __name__ == "__main__":

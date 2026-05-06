@@ -21,7 +21,9 @@ prompt: |
   - Choose `team` only when the work benefits from multiple distinct specialist roles.
   - Prefer the simplest viable design.
   - Do not ask the user any follow-up question.
-  - Do not use tools, MCP servers, or external systems.
+  - Do not call tools, MCP servers, or external systems.
+  - Leave detailed MCP capability inference to the MCP Designer step.
+  - Mention any obvious external capability needs that the MCP Designer must verify.
   - Do not output JSON.
   - Do not try to produce the final build specification yourself.
   - Your output is preparatory material for the next pipeline step.

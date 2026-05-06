@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+from contextlib import AsyncExitStack
 import json
 import types
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from .Agent import AgentConfig, AgentModelConfig
+from .Mcp import Mcp
 from .TeamAgent import HandoffHilSignalState, TeamAgent
 from .Tools import (
     FtryCliError,
@@ -125,6 +127,7 @@ class TeamConfig:
     agents: tuple[AgentConfig, ...]
     model: AgentModelConfig | None = None
     description: str | None = None
+    mcp_servers: tuple[str, ...] = ()
     termination: TeamTerminationConfig = field(default_factory=TeamTerminationConfig)
 
 
@@ -254,6 +257,10 @@ class Team:
         return self._config.description
 
     @property
+    def mcp_servers(self) -> tuple[str, ...]:
+        return self._config.mcp_servers
+
+    @property
     def instructions(self) -> str:
         return self._config.instructions
 
@@ -270,7 +277,7 @@ class Team:
         return self._config.termination
 
     async def run(self, prompt: str, *, user_input_provider: UserInputProvider | None = None) -> str:
-        pattern, workflow, author_name_map, handoff_hil_signal_state = await self._build_workflow(prompt)
+        pattern, workflow, author_name_map, handoff_hil_signal_state, workflow_resources = await self._build_workflow_with_resources(prompt)
         initial_prompt = prompt
         state = _TeamTraceState(
             pattern=pattern,
@@ -287,66 +294,74 @@ class Team:
         handoff_user_inputs: list[tuple[str, str]] = []
         handoff_agent_context: list[tuple[str, str]] = []
 
-        while True:
-            if first_run:
+        try:
+            while True:
+                if first_run:
+                    if handoff_hil_signal_state is not None:
+                        handoff_hil_signal_state.clear()
+                    stream = workflow.run(next_prompt, stream=True)
+                    first_run = False
+                    next_prompt = None
+                elif next_prompt is not None:
+                    if handoff_hil_signal_state is not None:
+                        handoff_hil_signal_state.clear()
+                    stream = workflow.run(next_prompt, stream=True)
+                    next_prompt = None
+                elif pending_responses is not None:
+                    stream = workflow.run(stream=True, responses=pending_responses)
+                else:
+                    break
+
+                pending_responses = await self._process_workflow_stream(
+                    stream,
+                    state=state,
+                    author_name_map=author_name_map,
+                    user_input_provider=user_input_provider,
+                )
+
                 if handoff_hil_signal_state is not None:
-                    handoff_hil_signal_state.clear()
-                stream = workflow.run(next_prompt, stream=True)
-                first_run = False
-                next_prompt = None
-            elif next_prompt is not None:
-                if handoff_hil_signal_state is not None:
-                    handoff_hil_signal_state.clear()
-                stream = workflow.run(next_prompt, stream=True)
-                next_prompt = None
-            elif pending_responses is not None:
-                stream = workflow.run(stream=True, responses=pending_responses)
-            else:
-                break
+                    if handoff_hil_signal_state.action == "request_user_input":
+                        request_prompt, user_input, requesting_agent = self._resolve_handoff_user_input(
+                            signal_state=handoff_hil_signal_state,
+                            state=state,
+                            user_input_provider=user_input_provider,
+                        )
+                        if state.last_agent_name and state.last_agent_full_output:
+                            handoff_agent_context.append((author_name_map.get(state.last_agent_name, state.last_agent_name), state.last_agent_full_output))
+                        handoff_user_inputs.append((request_prompt, user_input))
+                        next_prompt = self._build_handoff_resume_prompt(
+                            initial_prompt=initial_prompt,
+                            agent_context=handoff_agent_context,
+                            user_inputs=handoff_user_inputs,
+                        )
+                        await workflow_resources.aclose()
+                        pattern, workflow, author_name_map, handoff_hil_signal_state, workflow_resources = await self._build_workflow_with_resources(
+                            next_prompt,
+                            forced_pattern=pattern,
+                            forced_handoff_start_agent=requesting_agent,
+                        )
+                        pending_responses = None
+                        state.final_payload = None
+                        continue
 
-            pending_responses = await self._process_workflow_stream(
-                stream,
-                state=state,
-                author_name_map=author_name_map,
-                user_input_provider=user_input_provider,
-            )
+                    if handoff_hil_signal_state.action == "final_answer":
+                        state.final_payload = self._build_handoff_signal_payload(handoff_hil_signal_state)
 
-            if handoff_hil_signal_state is not None:
-                if handoff_hil_signal_state.action == "request_user_input":
-                    request_prompt, user_input, requesting_agent = self._resolve_handoff_user_input(
-                        signal_state=handoff_hil_signal_state,
-                        state=state,
-                        user_input_provider=user_input_provider,
-                    )
-                    if state.last_agent_name and state.last_agent_full_output:
-                        handoff_agent_context.append((author_name_map.get(state.last_agent_name, state.last_agent_name), state.last_agent_full_output))
-                    handoff_user_inputs.append((request_prompt, user_input))
-                    next_prompt = self._build_handoff_resume_prompt(
-                        initial_prompt=initial_prompt,
-                        agent_context=handoff_agent_context,
-                        user_inputs=handoff_user_inputs,
-                    )
-                    pattern, workflow, author_name_map, handoff_hil_signal_state = await self._build_workflow(
-                        next_prompt,
-                        forced_pattern=pattern,
-                        forced_handoff_start_agent=requesting_agent,
-                    )
-                    pending_responses = None
-                    state.final_payload = None
-                    continue
-
-                if handoff_hil_signal_state.action == "final_answer":
-                    state.final_payload = self._build_handoff_signal_payload(handoff_hil_signal_state)
-
-        state.flush_buffer()
-        rendered_output = _format_final_team_output(state.final_payload, author_name_map=author_name_map)
-        state.trace_final_output(state.final_payload, rendered_output, author_name_map)
-        return rendered_output
+            state.flush_buffer()
+            rendered_output = _format_final_team_output(state.final_payload, author_name_map=author_name_map)
+            state.trace_final_output(state.final_payload, rendered_output, author_name_map)
+            return rendered_output
+        finally:
+            await workflow_resources.aclose()
 
     @classmethod
     def _parse_config(cls, config: Mapping[str, Any], *, team_dir: Path | None) -> TeamConfig:
+        shared_mcp_servers = Mcp.parse_server_names(config.get("mcp"), field_name="mcp", config_kind="team")
         raw_agents = _require_sequence(config.get("agents"), "agents", "team")
-        agents = tuple(cls._load_agent_config(raw_agent, team_dir=team_dir) for raw_agent in raw_agents)
+        agents = tuple(
+            cls._load_agent_config(raw_agent, team_dir=team_dir, shared_mcp_servers=shared_mcp_servers)
+            for raw_agent in raw_agents
+        )
         if not agents:
             raise FtryCliError("Invalid or missing `agents` list in team YAML.")
 
@@ -362,24 +377,50 @@ class Team:
             instructions=_require_non_empty_string(config.get("prompt"), "prompt", "team"),
             agents=agents,
             model=AgentModelConfig.from_mapping(config.get("model"), config_kind="team", required=False),
+            mcp_servers=shared_mcp_servers,
             termination=cls._parse_termination(config.get("termination")),
         )
 
     @classmethod
-    def _load_agent_config(cls, raw_agent: Any, *, team_dir: Path | None) -> AgentConfig:
+    def _load_agent_config(
+        cls,
+        raw_agent: Any,
+        *,
+        team_dir: Path | None,
+        shared_mcp_servers: Sequence[str] = (),
+    ) -> AgentConfig:
         if isinstance(raw_agent, str):
-            return TeamAgent.from_file(raw_agent, base_dir=team_dir).config
+            return cls._apply_mcp_defaults(
+                TeamAgent.from_file(raw_agent, base_dir=team_dir).config,
+                shared_mcp_servers=shared_mcp_servers,
+            )
 
         agent_config = _require_mapping(raw_agent, "agents[]", "team")
         if "file" in agent_config:
-            if len(agent_config) != 1:
-                raise FtryCliError("Invalid `agents[]` entry in team YAML: `file` references cannot be mixed with inline fields.")
-            return TeamAgent.from_file(
+            unexpected_fields = set(agent_config).difference({"file", "mcp"})
+            if unexpected_fields:
+                raise FtryCliError(
+                    "Invalid `agents[]` entry in team YAML: `file` references cannot be mixed with inline fields "
+                    "other than optional `mcp`."
+                )
+            loaded_config = TeamAgent.from_file(
                 _require_non_empty_string(agent_config.get("file"), "agents[].file", "team"),
                 base_dir=team_dir,
             ).config
+            return cls._apply_mcp_defaults(
+                loaded_config,
+                shared_mcp_servers=shared_mcp_servers,
+                local_mcp_servers=Mcp.parse_server_names(
+                    agent_config.get("mcp"),
+                    field_name="agents[].mcp",
+                    config_kind="team",
+                ),
+            )
 
-        return TeamAgent.from_mapping(agent_config, config_kind="team agent").config
+        return cls._apply_mcp_defaults(
+            TeamAgent.from_mapping(agent_config, config_kind="team agent").config,
+            shared_mcp_servers=shared_mcp_servers,
+        )
 
     @staticmethod
     def _parse_termination(raw_termination: Any) -> TeamTerminationConfig:
@@ -803,6 +844,39 @@ class Team:
 
         return participants, author_name_map
 
+    async def _build_participants_with_mcp(
+        self,
+        *,
+        participant_plans: Sequence[_PlannedTeamParticipant],
+        extra_instructions: str | None,
+        exit_stack: AsyncExitStack,
+        use_managed_participants: bool,
+        enforce_structured_output: bool = True,
+        require_per_service_call_history_persistence: bool = False,
+        handoff_hil_signal_state: HandoffHilSignalState | None = None,
+    ) -> tuple[list[Any], dict[str, str]]:
+        participants: list[Any] = []
+        author_name_map: dict[str, str] = {}
+
+        for plan in participant_plans:
+            author_name_map[plan.internal_name] = plan.display_name
+            team_agent = TeamAgent(plan.config)
+            participant_factory = (
+                team_agent.create_managed_participant if use_managed_participants else team_agent.create_participant
+            )
+            participant_kwargs: dict[str, Any] = {
+                "extra_instructions": extra_instructions,
+                "name_override": plan.internal_name,
+                "require_per_service_call_history_persistence": require_per_service_call_history_persistence,
+                "tools": await team_agent._enter_mcp_tools(exit_stack),
+            }
+            if use_managed_participants:
+                participant_kwargs["enforce_structured_output"] = enforce_structured_output
+                participant_kwargs["handoff_hil_signal_state"] = handoff_hil_signal_state
+            participants.append(participant_factory(**participant_kwargs))
+
+        return participants, author_name_map
+
     def _build_handoff_workflow(
         self,
         *,
@@ -837,79 +911,115 @@ class Team:
         forced_pattern: str | None = None,
         forced_handoff_start_agent: str | None = None,
     ) -> tuple[str, Any, Mapping[str, str], HandoffHilSignalState | None]:
-        rendered_instructions = self._render_instructions()
-        participant_plans = self._build_participant_plans()
-        if forced_pattern is None:
-            inference = await self._infer_pattern(
-                current_input=current_input,
-                rendered_instructions=rendered_instructions,
+        pattern, workflow, author_name_map, handoff_hil_signal_state, workflow_resources = await self._build_workflow_with_resources(
+            current_input,
+            forced_pattern=forced_pattern,
+            forced_handoff_start_agent=forced_handoff_start_agent,
+        )
+        await workflow_resources.aclose()
+        return pattern, workflow, author_name_map, handoff_hil_signal_state
+
+    async def _build_workflow_with_resources(
+        self,
+        current_input: str,
+        *,
+        forced_pattern: str | None = None,
+        forced_handoff_start_agent: str | None = None,
+    ) -> tuple[str, Any, Mapping[str, str], HandoffHilSignalState | None, AsyncExitStack]:
+        workflow_resources = AsyncExitStack()
+        try:
+            rendered_instructions = self._render_instructions()
+            participant_plans = self._build_participant_plans()
+            if forced_pattern is None:
+                inference = await self._infer_pattern(
+                    current_input=current_input,
+                    rendered_instructions=rendered_instructions,
+                    participant_plans=participant_plans,
+                )
+                pattern = inference.pattern
+            else:
+                pattern = forced_pattern
+            inject_team_context = pattern in TEAM_CONTEXT_PATTERNS or self.model is None
+            handoff_hil_signal_state = HandoffHilSignalState() if pattern == "handoff" else None
+            participants, author_name_map = await self._build_participants_with_mcp(
                 participant_plans=participant_plans,
+                extra_instructions=rendered_instructions if inject_team_context else None,
+                exit_stack=workflow_resources,
+                use_managed_participants=pattern != "concurrent",
+                enforce_structured_output=pattern != "handoff",
+                require_per_service_call_history_persistence=pattern == "handoff",
+                handoff_hil_signal_state=handoff_hil_signal_state,
             )
-            pattern = inference.pattern
-        else:
-            pattern = forced_pattern
-        inject_team_context = pattern in TEAM_CONTEXT_PATTERNS or self.model is None
-        handoff_hil_signal_state = HandoffHilSignalState() if pattern == "handoff" else None
-        participants, author_name_map = self._build_participants(
-            participant_plans=participant_plans,
-            extra_instructions=rendered_instructions if inject_team_context else None,
-            use_managed_participants=pattern != "concurrent",
-            enforce_structured_output=pattern != "handoff",
-            require_per_service_call_history_persistence=pattern == "handoff",
-            handoff_hil_signal_state=handoff_hil_signal_state,
-        )
-        SequentialBuilder, ConcurrentBuilder, HandoffBuilder, GroupChatBuilder, MagenticBuilder = (
-            self._load_orchestration_builders()
-        )
-        team_internal_name = _sanitize_agent_name(self.name, fallback_prefix="team")
-        author_name_map[team_internal_name] = self.name
+            SequentialBuilder, ConcurrentBuilder, HandoffBuilder, GroupChatBuilder, MagenticBuilder = (
+                self._load_orchestration_builders()
+            )
+            team_internal_name = _sanitize_agent_name(self.name, fallback_prefix="team")
+            author_name_map[team_internal_name] = self.name
 
-        if pattern in {"sequential", "concurrent"}:
-            builder = {"sequential": SequentialBuilder, "concurrent": ConcurrentBuilder}[pattern]
-            workflow_builder = builder(participants=participants, intermediate_outputs=True)
-            return pattern, workflow_builder.build(), author_name_map, None
+            if pattern in {"sequential", "concurrent"}:
+                builder = {"sequential": SequentialBuilder, "concurrent": ConcurrentBuilder}[pattern]
+                workflow_builder = builder(participants=participants, intermediate_outputs=True)
+                return pattern, workflow_builder.build(), author_name_map, None, workflow_resources
 
-        if pattern == "handoff":
-            return (
-                pattern,
-                self._build_handoff_workflow(
+            if pattern == "handoff":
+                return (
+                    pattern,
+                    self._build_handoff_workflow(
+                        participants=participants,
+                        handoff_builder_type=HandoffBuilder,
+                        handoff_hil_signal_state=handoff_hil_signal_state or HandoffHilSignalState(),
+                        preferred_start_agent_name=forced_handoff_start_agent,
+                    ),
+                    author_name_map,
+                    handoff_hil_signal_state,
+                    workflow_resources,
+                )
+
+            controller_agent = self._create_controller_agent(instructions=rendered_instructions)
+            if pattern == "group-chat":
+                workflow_builder = GroupChatBuilder(
                     participants=participants,
-                    handoff_builder_type=HandoffBuilder,
-                    handoff_hil_signal_state=handoff_hil_signal_state or HandoffHilSignalState(),
-                    preferred_start_agent_name=forced_handoff_start_agent,
-                ),
-                author_name_map,
-                handoff_hil_signal_state,
-            )
+                    orchestrator_agent=controller_agent,
+                    orchestrator_name=self.name,
+                    max_rounds=self.termination.max_turns,
+                    intermediate_outputs=True,
+                )
+                return (
+                    pattern,
+                    workflow_builder.build(),
+                    author_name_map,
+                    None,
+                    workflow_resources,
+                )
 
-        controller_agent = self._create_controller_agent(instructions=rendered_instructions)
-        if pattern == "group-chat":
-            workflow_builder = GroupChatBuilder(
-                participants=participants,
-                orchestrator_agent=controller_agent,
-                orchestrator_name=self.name,
-                max_rounds=self.termination.max_turns,
-                intermediate_outputs=True,
-            )
             return (
                 pattern,
-                workflow_builder.build(),
+                MagenticBuilder(
+                    participants=participants,
+                    enable_plan_review=False,
+                    manager_agent=controller_agent,
+                    max_round_count=self.termination.max_turns,
+                    intermediate_outputs=True,
+                ).build(),
                 author_name_map,
                 None,
+                workflow_resources,
             )
+        except Exception:
+            await workflow_resources.aclose()
+            raise
 
-        return (
-            pattern,
-            MagenticBuilder(
-                participants=participants,
-                enable_plan_review=False,
-                manager_agent=controller_agent,
-                max_round_count=self.termination.max_turns,
-                intermediate_outputs=True,
-            ).build(),
-            author_name_map,
-            None,
-        )
+    @staticmethod
+    def _apply_mcp_defaults(
+        agent_config: AgentConfig,
+        *,
+        shared_mcp_servers: Sequence[str] = (),
+        local_mcp_servers: Sequence[str] = (),
+    ) -> AgentConfig:
+        merged_mcp_servers = Mcp.merge_server_names(shared_mcp_servers, agent_config.mcp_servers, local_mcp_servers)
+        if merged_mcp_servers == agent_config.mcp_servers:
+            return agent_config
+        return replace(agent_config, mcp_servers=merged_mcp_servers)
 
     @staticmethod
     def _handle_group_chat_event(event: Any, state: _TeamTraceState, author_name_map: Mapping[str, str]) -> None:
