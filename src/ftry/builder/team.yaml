@@ -39,12 +39,14 @@ prompt: |
   - Run the agents as a fixed pipeline in the exact order listed above.
   - Each step must build on the previous step's output.
   - Work autonomously from the initial user message only.
-  - Do not ask the user for clarification.
+  - Ask the user for clarification only when a missing configuration detail blocks a correct build, especially for unresolved MCP connection details.
   - Do not call tools, MCP servers, or external systems.
   - Prefer the simplest design that can satisfy the request.
   - Reuse existing MCP descriptors listed in the input whenever possible.
   - Create a new MCP descriptor only when the user request clearly requires a capability not covered by the existing catalog.
-  - MCP descriptors must stay declarative and safe: no clear-text secrets, no opaque shell tricks, and prefer valid stubs over guessed operational details.
+  - MCP descriptors must stay declarative and safe: no clear-text secrets, no opaque shell tricks, and never invent a stdio launch command.
+  - If no existing descriptor matches and no real connection details are known, prefer leaving the MCP need unresolved over fabricating a runnable descriptor.
+  - If the MCP Designer asks the user for a blocking MCP clarification, wait for that answer before proceeding to the next steps.
   - Only the last step may produce the final answer.
   - The final answer must be one raw JSON object only, with no Markdown fences and no extra text before or after it.
   - Here is the list of agents with their expertise:

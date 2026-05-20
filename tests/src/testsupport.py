@@ -115,12 +115,17 @@ class _FakeMcpToolBase:
     created_tools: list["_FakeMcpToolBase"] = []
     entered_tools: list["_FakeMcpToolBase"] = []
     closed_tools: list["_FakeMcpToolBase"] = []
+    discovery_tools: list[object] = []
+    discovery_prompts: list[object] = []
+    discovery_resources: list[object] = []
+    discovery_resource_templates: list[object] = []
 
     def __init__(self, **kwargs: object) -> None:
         self.kwargs = kwargs
         self.name = kwargs.get("name")
         self.description = kwargs.get("description")
         self.closed = False
+        self.session = _FakeMcpSession(self)
         type(self).created_tools.append(self)
 
     async def __aenter__(self) -> "_FakeMcpToolBase":
@@ -146,6 +151,27 @@ class FakeMCPStreamableHTTPTool(_FakeMcpToolBase):
 
 class FakeMCPWebsocketTool(_FakeMcpToolBase):
     pass
+
+
+class _FakeMcpSession:
+    def __init__(self, owner: _FakeMcpToolBase) -> None:
+        self._owner = owner
+
+    async def list_tools(self, cursor: str | None = None, *, params: object | None = None) -> object:
+        del cursor, params
+        return types.SimpleNamespace(tools=list(type(self._owner).discovery_tools), nextCursor=None)
+
+    async def list_prompts(self, cursor: str | None = None, *, params: object | None = None) -> object:
+        del cursor, params
+        return types.SimpleNamespace(prompts=list(type(self._owner).discovery_prompts), nextCursor=None)
+
+    async def list_resources(self, cursor: str | None = None, *, params: object | None = None) -> object:
+        del cursor, params
+        return types.SimpleNamespace(resources=list(type(self._owner).discovery_resources), nextCursor=None)
+
+    async def list_resource_templates(self, cursor: str | None = None, *, params: object | None = None) -> object:
+        del cursor, params
+        return types.SimpleNamespace(resourceTemplates=list(type(self._owner).discovery_resource_templates), nextCursor=None)
 
 
 class FakeOpenAIChatCompletionClient:
@@ -794,12 +820,24 @@ def reset_fakes() -> None:
     FakeMCPStdioTool.created_tools = []
     FakeMCPStdioTool.entered_tools = []
     FakeMCPStdioTool.closed_tools = []
+    FakeMCPStdioTool.discovery_tools = []
+    FakeMCPStdioTool.discovery_prompts = []
+    FakeMCPStdioTool.discovery_resources = []
+    FakeMCPStdioTool.discovery_resource_templates = []
     FakeMCPStreamableHTTPTool.created_tools = []
     FakeMCPStreamableHTTPTool.entered_tools = []
     FakeMCPStreamableHTTPTool.closed_tools = []
+    FakeMCPStreamableHTTPTool.discovery_tools = []
+    FakeMCPStreamableHTTPTool.discovery_prompts = []
+    FakeMCPStreamableHTTPTool.discovery_resources = []
+    FakeMCPStreamableHTTPTool.discovery_resource_templates = []
     FakeMCPWebsocketTool.created_tools = []
     FakeMCPWebsocketTool.entered_tools = []
     FakeMCPWebsocketTool.closed_tools = []
+    FakeMCPWebsocketTool.discovery_tools = []
+    FakeMCPWebsocketTool.discovery_prompts = []
+    FakeMCPWebsocketTool.discovery_resources = []
+    FakeMCPWebsocketTool.discovery_resource_templates = []
     FakeWorkflow.last_prompt = None
     FakeWorkflow.last_responses = None
     FakeWorkflow.run_calls = []

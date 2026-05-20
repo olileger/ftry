@@ -11,7 +11,7 @@ Minimal CLI named `ftry`.
 - `ftry line`
 
 The `ftry build` command takes a prompt with `-p`, uses an internal builder team to decide whether the request should become one agent or one team, then writes the generated YAML files under `.\output\<generated-name>\`.
-When MCP integration is relevant, `build` reuses descriptors already present in `.\mcp\` and can generate a new conservative MCP descriptor in `.\mcp\` when the request clearly requires one.
+When MCP integration is relevant, `build` reuses descriptors already present in `.\mcp\` and can generate new conservative MCP descriptors under `.\output\mcp\` when the request clearly requires them.
 
 Example:
 
@@ -25,7 +25,7 @@ The `ftry pop` command loads either an agent (`-a`) or a team of agents (`-t`) f
 In an interactive terminal, it prints the static `POP` banner before the run starts, loading it from `src\ftry\ascii-art\pop.txt`.
 For direct agent runs (`ftry pop -a`), `ftry` now keeps the same Agent Framework session across turns and lets the model decide, via a structured turn status, whether the conversation is done or whether it is waiting for the next user input.
 For team runs (`ftry pop -t`), `ftry` now infers both the orchestration type and the need for Human in the Loop `request_info` from the current user request, the team prompt, and the participating agent roles, then resumes supported Microsoft Agent Framework workflows when those request events are emitted.
-When an agent or team YAML declares `mcp`, `pop` resolves those descriptors from the current working directory `.\mcp\` folder and wires them into Microsoft Agent Framework MCP tools at runtime.
+When an agent or team YAML declares `mcp`, `pop` resolves those descriptors from a sibling `.\mcp\` folder next to the loaded YAML first, then from the parent directory's `.\mcp\` folder, then falls back to the current working directory `.\mcp\` folder, and wires them into Microsoft Agent Framework MCP tools at runtime.
 
 Example:
 
@@ -89,7 +89,7 @@ ftry line
 
 ## MCP descriptors
 
-Reusable MCP server descriptors live in the current working directory under `.\mcp\`.
+Reusable MCP server descriptors can live either next to the loaded agent/team YAML under `.\mcp\` or in the current working directory under `.\mcp\`.
 
 Example descriptor:
 
@@ -156,12 +156,14 @@ python -m pip install -e .
 
 If you already had `ftry` installed before MCP support was added, reinstall it so the new dependency is picked up.
 
+At `ftry pop` runtime, MCP-enabled agents and teams now connect to their referenced MCP servers before first use and discover the live capability directory exposed by those servers. This live discovery stays in memory only and is injected into the agent execution context for the current run; `ftry` does not write any discovery snapshot back into YAML or cache files.
+
 `ftry build` follows a conservative MCP policy:
 
 - reuse an existing descriptor from `.\mcp\` whenever possible;
-- only create a new descriptor when the request clearly requires a new server;
+- only create a new descriptor when the request clearly requires a new server, and place generated descriptors under the command output directory's `mcp` folder;
 - never write clear-text secrets;
-- prefer valid stubs over guessed commands, URLs, or credentials.
+- never invent runnable stdio commands; reuse a real descriptor or provide real connection details only.
 
 ## Tests
 

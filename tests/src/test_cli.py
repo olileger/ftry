@@ -51,7 +51,11 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         print_build_banner.assert_called_once_with()
-        build_from_prompt.assert_called_once_with("Create a team", output_dir=r"C:\temp")
+        build_from_prompt.assert_called_once_with(
+            "Create a team",
+            output_dir=r"C:\temp",
+            user_input_provider=cli._read_agent_follow_up_input,
+        )
         self.assertEqual(stdout.getvalue().splitlines(), [r"C:\temp\agent-alpha.yaml", r"C:\temp\team.yaml"])
 
     def test_run_build_command_uses_default_output_root_when_no_directory_is_passed(self) -> None:
@@ -66,7 +70,11 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         print_build_banner.assert_called_once_with()
-        build_from_prompt.assert_called_once_with("Create an agent", output_dir=None)
+        build_from_prompt.assert_called_once_with(
+            "Create an agent",
+            output_dir=None,
+            user_input_provider=cli._read_agent_follow_up_input,
+        )
         self.assertEqual(stdout.getvalue().splitlines(), [r"C:\temp\output\agent\agent.yaml"])
 
     def test_run_pop_command_dispatches_agent_prompts(self) -> None:

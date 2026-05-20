@@ -393,6 +393,7 @@ class Team:
             return cls._apply_mcp_defaults(
                 TeamAgent.from_file(raw_agent, base_dir=team_dir).config,
                 shared_mcp_servers=shared_mcp_servers,
+                mcp_registry_dir=team_dir,
             )
 
         agent_config = _require_mapping(raw_agent, "agents[]", "team")
@@ -415,11 +416,13 @@ class Team:
                     field_name="agents[].mcp",
                     config_kind="team",
                 ),
+                mcp_registry_dir=team_dir,
             )
 
         return cls._apply_mcp_defaults(
             TeamAgent.from_mapping(agent_config, config_kind="team agent").config,
             shared_mcp_servers=shared_mcp_servers,
+            mcp_registry_dir=team_dir,
         )
 
     @staticmethod
@@ -864,11 +867,12 @@ class Team:
             participant_factory = (
                 team_agent.create_managed_participant if use_managed_participants else team_agent.create_participant
             )
+            mcp_tools, mcp_context = await team_agent._prepare_mcp_runtime(exit_stack)
             participant_kwargs: dict[str, Any] = {
-                "extra_instructions": extra_instructions,
+                "extra_instructions": team_agent._merge_extra_instructions(extra_instructions, mcp_context),
                 "name_override": plan.internal_name,
                 "require_per_service_call_history_persistence": require_per_service_call_history_persistence,
-                "tools": await team_agent._enter_mcp_tools(exit_stack),
+                "tools": mcp_tools,
             }
             if use_managed_participants:
                 participant_kwargs["enforce_structured_output"] = enforce_structured_output
@@ -1015,11 +1019,12 @@ class Team:
         *,
         shared_mcp_servers: Sequence[str] = (),
         local_mcp_servers: Sequence[str] = (),
+        mcp_registry_dir: Path | None = None,
     ) -> AgentConfig:
         merged_mcp_servers = Mcp.merge_server_names(shared_mcp_servers, agent_config.mcp_servers, local_mcp_servers)
-        if merged_mcp_servers == agent_config.mcp_servers:
+        if merged_mcp_servers == agent_config.mcp_servers and mcp_registry_dir == agent_config.mcp_registry_dir:
             return agent_config
-        return replace(agent_config, mcp_servers=merged_mcp_servers)
+        return replace(agent_config, mcp_servers=merged_mcp_servers, mcp_registry_dir=mcp_registry_dir or agent_config.mcp_registry_dir)
 
     @staticmethod
     def _handle_group_chat_event(event: Any, state: _TeamTraceState, author_name_map: Mapping[str, str]) -> None:

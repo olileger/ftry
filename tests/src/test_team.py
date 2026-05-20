@@ -4,6 +4,7 @@ import asyncio
 import io
 import os
 import sys
+import types
 import unittest
 from contextlib import redirect_stderr
 from pathlib import Path
@@ -241,6 +242,13 @@ class TeamTests(unittest.TestCase):
 
     def test_build_workflow_with_resources_attaches_mcp_tools_to_participants(self) -> None:
         reset_fakes()
+        FakeMCPStdioTool.discovery_tools = [
+            types.SimpleNamespace(
+                name="write_file",
+                description="Write a file to disk.",
+                inputSchema={"type": "object", "properties": {"path": {"type": "string"}}},
+            )
+        ]
         with TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
             registry_dir = temp_path / "mcp"
@@ -289,6 +297,8 @@ class TeamTests(unittest.TestCase):
                     participants = workflow.kwargs["participants"]
                     self.assertEqual(len(participants[0].tools), 1)
                     self.assertEqual(participants[0].tools[0].name, "shared-files")
+                    self.assertIn("<McpRuntimeCapabilities>", participants[0].instructions)
+                    self.assertIn("write_file", participants[0].instructions)
                     await resources.aclose()
 
             with patch("ftry.Mcp.Path.cwd", return_value=temp_path):
@@ -296,6 +306,67 @@ class TeamTests(unittest.TestCase):
 
         self.assertEqual(len(FakeMCPStdioTool.entered_tools), 2)
         self.assertEqual(len(FakeMCPStdioTool.closed_tools), 2)
+
+    def test_team_from_file_resolves_mcp_registry_from_output_root_directory(self) -> None:
+        reset_fakes()
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            output_root = temp_path / "output"
+            team_dir = output_root / "launch-team"
+            team_dir.mkdir(parents=True)
+            (output_root / "mcp").mkdir()
+            (output_root / "mcp" / "shared-files.yaml").write_text(
+                '\n'.join(['name: "shared-files"', 'transport: "stdio"', 'command: "uvx"']),
+                encoding="utf-8",
+            )
+            team_file = team_dir / "team.yaml"
+            team_file.write_text(
+                "\n".join(
+                    [
+                        'name: "Launch Team"',
+                        "model:",
+                        '  name: "gpt-4o"',
+                        '  provider: "openai"',
+                        '  api-key: "secret"',
+                        "mcp:",
+                        '  - "shared-files"',
+                        "agents:",
+                        '  - name: "Researcher"',
+                        "    model:",
+                        '      name: "gpt-4o"',
+                        '      provider: "openai"',
+                        '      api-key: "secret"',
+                        "    prompt: |",
+                        "      Research.",
+                        '  - name: "Writer"',
+                        "    model:",
+                        '      name: "gpt-4o"',
+                        '      provider: "openai"',
+                        '      api-key: "secret"',
+                        "    prompt: |",
+                        "      Write.",
+                        "prompt: |",
+                        "  Coordinate.",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            team = team_module.Team.from_file(team_file)
+
+            async def build_workflow() -> None:
+                with patch.dict(sys.modules, make_fake_agent_framework_modules(), clear=False):
+                    pattern, workflow, _, _, resources = await team._build_workflow_with_resources(
+                        "Analyse this request.",
+                        forced_pattern="sequential",
+                    )
+                    self.assertEqual(pattern, "sequential")
+                    self.assertEqual(len(workflow.kwargs["participants"][0].tools), 1)
+                    await resources.aclose()
+
+            with patch("ftry.Mcp.Path.cwd", return_value=temp_path):
+                asyncio.run(build_workflow())
+
+        self.assertEqual(len(FakeMCPStdioTool.entered_tools), 2)
 
     def test_team_from_file_validates_nominal_and_error_cases(self) -> None:
         with TemporaryDirectory() as temp_dir:

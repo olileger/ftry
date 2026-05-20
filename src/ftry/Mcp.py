@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import os
+from collections.abc import Sequence as SequenceCollection
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from pathlib import Path
@@ -34,6 +36,56 @@ class McpConfig:
     headers: Mapping[str, str] | None = None
     allowed_tools: tuple[str, ...] = ()
     source_path: Path | None = None
+
+
+@dataclass(frozen=True)
+class McpDiscoveredTool:
+    name: str
+    title: str | None = None
+    description: str | None = None
+    input_schema_summary: str | None = None
+
+
+@dataclass(frozen=True)
+class McpDiscoveredPrompt:
+    name: str
+    title: str | None = None
+    description: str | None = None
+    arguments_summary: str | None = None
+
+
+@dataclass(frozen=True)
+class McpDiscoveredResource:
+    name: str
+    uri: str
+    title: str | None = None
+    description: str | None = None
+
+
+@dataclass(frozen=True)
+class McpDiscoveredResourceTemplate:
+    name: str
+    uri_template: str
+    title: str | None = None
+    description: str | None = None
+
+
+@dataclass(frozen=True)
+class McpServerCapabilities:
+    server_name: str
+    transport: str
+    tools: tuple[McpDiscoveredTool, ...] = ()
+    prompts: tuple[McpDiscoveredPrompt, ...] = ()
+    resources: tuple[McpDiscoveredResource, ...] = ()
+    resource_templates: tuple[McpDiscoveredResourceTemplate, ...] = ()
+    warnings: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class McpRuntimeConnection:
+    mcp: Mcp
+    tool: Any
+    capabilities: McpServerCapabilities
 
 
 class Mcp:
@@ -112,13 +164,17 @@ class Mcp:
         if not resolved_names:
             return ()
 
-        registry_dir = cls.get_registry_dir(cwd=cwd)
-        catalog = {config.name: config for config in cls.load_catalog(cwd=cwd)}
+        searched_registry_dirs = [cls.get_registry_dir(cwd=base_dir) for base_dir in _iter_registry_base_dirs(cwd)]
+        catalog: dict[str, McpConfig] = {}
+        for base_dir in _iter_registry_base_dirs(cwd):
+            for config in cls.load_catalog(cwd=base_dir):
+                catalog.setdefault(config.name, config)
         missing_names = [name for name in resolved_names if name not in catalog]
         if missing_names:
             missing_fragment = ", ".join(f"`{name}`" for name in missing_names)
+            registry_fragment = ", ".join(f"`{path}`" for path in searched_registry_dirs)
             raise FtryCliError(
-                f"Referenced MCP descriptor(s) not found in `{registry_dir}`: {missing_fragment}"
+                f"Referenced MCP descriptor(s) not found in {registry_fragment}: {missing_fragment}"
             )
         return tuple(catalog[name] for name in resolved_names)
 
@@ -189,19 +245,119 @@ class Mcp:
         return "\n".join(lines)
 
     @classmethod
+    async def open_connections(
+        cls,
+        mcps: Sequence[Mcp],
+        *,
+        exit_stack: AsyncExitStack,
+    ) -> tuple[McpRuntimeConnection, ...]:
+        connections: list[McpRuntimeConnection] = []
+        for mcp in mcps:
+            tool = await mcp.enter_tool(exit_stack=exit_stack)
+            connections.append(
+                McpRuntimeConnection(
+                    mcp=mcp,
+                    tool=tool,
+                    capabilities=await mcp.discover_capabilities(tool),
+                )
+            )
+        return tuple(connections)
+
+    @classmethod
     async def open_tools(
         cls,
         mcps: Sequence[Mcp],
         *,
         exit_stack: AsyncExitStack,
     ) -> tuple[Any, ...]:
-        tools: list[Any] = []
-        for mcp in mcps:
-            tools.append(await mcp.enter_tool(exit_stack=exit_stack))
-        return tuple(tools)
+        return tuple(connection.tool for connection in await cls.open_connections(mcps, exit_stack=exit_stack))
+
+    @staticmethod
+    def extract_tools(connections: Sequence[McpRuntimeConnection]) -> tuple[Any, ...]:
+        return tuple(connection.tool for connection in connections)
+
+    @classmethod
+    def render_runtime_context(cls, connections: Sequence[McpRuntimeConnection]) -> str | None:
+        if not connections:
+            return None
+
+        lines = [
+            "<McpRuntimeCapabilities>",
+            "The following MCP servers were connected live for this run. Base your tool usage on this live capability directory.",
+        ]
+        for connection in connections:
+            capabilities = connection.capabilities
+            lines.append(f"Server `{capabilities.server_name}` (transport: {capabilities.transport})")
+            if capabilities.tools:
+                lines.append("  Tools:")
+                for tool in capabilities.tools:
+                    line = f"    - {tool.name}"
+                    if tool.title:
+                        line += f" | title: {tool.title}"
+                    if tool.description:
+                        line += f" | description: {tool.description}"
+                    if tool.input_schema_summary:
+                        line += f" | input-schema: {tool.input_schema_summary}"
+                    lines.append(line)
+            if capabilities.prompts:
+                lines.append("  Prompts:")
+                for prompt in capabilities.prompts:
+                    line = f"    - {prompt.name}"
+                    if prompt.title:
+                        line += f" | title: {prompt.title}"
+                    if prompt.description:
+                        line += f" | description: {prompt.description}"
+                    if prompt.arguments_summary:
+                        line += f" | arguments: {prompt.arguments_summary}"
+                    lines.append(line)
+            if capabilities.resources:
+                lines.append("  Resources:")
+                for resource in capabilities.resources:
+                    line = f"    - {resource.name} | uri: {resource.uri}"
+                    if resource.title:
+                        line += f" | title: {resource.title}"
+                    if resource.description:
+                        line += f" | description: {resource.description}"
+                    lines.append(line)
+            if capabilities.resource_templates:
+                lines.append("  Resource templates:")
+                for resource_template in capabilities.resource_templates:
+                    line = f"    - {resource_template.name} | uri-template: {resource_template.uri_template}"
+                    if resource_template.title:
+                        line += f" | title: {resource_template.title}"
+                    if resource_template.description:
+                        line += f" | description: {resource_template.description}"
+                    lines.append(line)
+            if capabilities.warnings:
+                lines.append("  Discovery warnings:")
+                for warning in capabilities.warnings:
+                    lines.append(f"    - {warning}")
+        lines.append("</McpRuntimeCapabilities>")
+        return "\n".join(lines)
 
     async def enter_tool(self, *, exit_stack: AsyncExitStack) -> Any:
         return await exit_stack.enter_async_context(self.create_tool())
+
+    async def discover_capabilities(self, tool: Any) -> McpServerCapabilities:
+        warnings: list[str] = []
+        session = getattr(tool, "session", None)
+        if session is None:
+            warnings.append("Live MCP session metadata is not exposed by the runtime tool.")
+            return McpServerCapabilities(
+                server_name=self.config.name,
+                transport=self.config.transport,
+                warnings=tuple(warnings),
+            )
+
+        return McpServerCapabilities(
+            server_name=self.config.name,
+            transport=self.config.transport,
+            tools=await self._discover_tools(session, warnings=warnings),
+            prompts=await self._discover_prompts(session, warnings=warnings),
+            resources=await self._discover_resources(session, warnings=warnings),
+            resource_templates=await self._discover_resource_templates(session, warnings=warnings),
+            warnings=tuple(warnings),
+        )
 
     def create_tool(self) -> Any:
         self._require_runtime_dependency()
@@ -257,6 +413,142 @@ class Mcp:
             **websocket_kwargs,
         )
 
+    async def _discover_tools(self, session: Any, *, warnings: list[str]) -> tuple[McpDiscoveredTool, ...]:
+        records = await self._list_session_items(
+            session,
+            method_name="list_tools",
+            items_field="tools",
+            warning_label="tools",
+            warnings=warnings,
+        )
+        tools: list[McpDiscoveredTool] = []
+        for record in records:
+            name = _read_string_field(record, "name")
+            if not name or self._is_filtered_out(name):
+                continue
+            tools.append(
+                McpDiscoveredTool(
+                    name=name,
+                    title=_read_string_field(record, "title"),
+                    description=_read_string_field(record, "description"),
+                    input_schema_summary=_summarize_json_like(_read_field(record, "inputSchema")),
+                )
+            )
+        return tuple(tools)
+
+    async def _discover_prompts(self, session: Any, *, warnings: list[str]) -> tuple[McpDiscoveredPrompt, ...]:
+        records = await self._list_session_items(
+            session,
+            method_name="list_prompts",
+            items_field="prompts",
+            warning_label="prompts",
+            warnings=warnings,
+        )
+        prompts: list[McpDiscoveredPrompt] = []
+        for record in records:
+            name = _read_string_field(record, "name")
+            if not name or self._is_filtered_out(name):
+                continue
+            prompts.append(
+                McpDiscoveredPrompt(
+                    name=name,
+                    title=_read_string_field(record, "title"),
+                    description=_read_string_field(record, "description"),
+                    arguments_summary=_summarize_prompt_arguments(_read_field(record, "arguments")),
+                )
+            )
+        return tuple(prompts)
+
+    async def _discover_resources(self, session: Any, *, warnings: list[str]) -> tuple[McpDiscoveredResource, ...]:
+        records = await self._list_session_items(
+            session,
+            method_name="list_resources",
+            items_field="resources",
+            warning_label="resources",
+            warnings=warnings,
+        )
+        resources: list[McpDiscoveredResource] = []
+        for record in records:
+            name = _read_string_field(record, "name")
+            uri = _read_string_field(record, "uri")
+            if not name or not uri:
+                continue
+            resources.append(
+                McpDiscoveredResource(
+                    name=name,
+                    uri=uri,
+                    title=_read_string_field(record, "title"),
+                    description=_read_string_field(record, "description"),
+                )
+            )
+        return tuple(resources)
+
+    async def _discover_resource_templates(
+        self,
+        session: Any,
+        *,
+        warnings: list[str],
+    ) -> tuple[McpDiscoveredResourceTemplate, ...]:
+        records = await self._list_session_items(
+            session,
+            method_name="list_resource_templates",
+            items_field="resourceTemplates",
+            warning_label="resource templates",
+            warnings=warnings,
+        )
+        resource_templates: list[McpDiscoveredResourceTemplate] = []
+        for record in records:
+            name = _read_string_field(record, "name")
+            uri_template = _read_string_field(record, "uriTemplate")
+            if not name or not uri_template:
+                continue
+            resource_templates.append(
+                McpDiscoveredResourceTemplate(
+                    name=name,
+                    uri_template=uri_template,
+                    title=_read_string_field(record, "title"),
+                    description=_read_string_field(record, "description"),
+                )
+            )
+        return tuple(resource_templates)
+
+    async def _list_session_items(
+        self,
+        session: Any,
+        *,
+        method_name: str,
+        items_field: str,
+        warning_label: str,
+        warnings: list[str],
+    ) -> tuple[Any, ...]:
+        list_method = getattr(session, method_name, None)
+        if list_method is None:
+            warnings.append(f"Runtime MCP session does not expose {warning_label}.")
+            return ()
+
+        items: list[Any] = []
+        cursor: str | None = None
+        while True:
+            try:
+                page = await list_method(cursor=cursor)
+            except TypeError:
+                page = await list_method()
+            except Exception as exc:
+                warnings.append(f"Could not list {warning_label} from MCP server `{self.config.name}`: {exc}")
+                return tuple(items)
+
+            raw_items = _read_field(page, items_field)
+            if isinstance(raw_items, SequenceCollection) and not isinstance(raw_items, (str, bytes, bytearray)):
+                items.extend(raw_items)
+            cursor_value = _read_field(page, "nextCursor")
+            cursor = cursor_value if isinstance(cursor_value, str) and cursor_value else None
+            if cursor is None:
+                break
+        return tuple(items)
+
+    def _is_filtered_out(self, remote_name: str) -> bool:
+        return bool(self.config.allowed_tools) and remote_name not in self.config.allowed_tools
+
     @staticmethod
     def _require_runtime_dependency() -> None:
         try:
@@ -299,6 +591,33 @@ def _parse_string_required(raw_value: Any, *, field_name: str, config_kind: str)
     return _require_non_empty_string(raw_value, field_name, config_kind)
 
 
+def _iter_registry_base_dirs(preferred_dir: Path | None) -> tuple[Path, ...]:
+    candidate_dirs: list[Path] = []
+    if preferred_dir is not None:
+        preferred_path = Path(preferred_dir)
+        candidate_dirs.append(preferred_path)
+        parent_dir = preferred_path.parent
+        if parent_dir != preferred_path:
+            candidate_dirs.append(parent_dir)
+    current_dir = Path.cwd()
+    if all(candidate.resolve() != current_dir.resolve() for candidate in candidate_dirs if candidate.exists()):
+        candidate_dirs.append(current_dir)
+    elif not candidate_dirs:
+        candidate_dirs.append(current_dir)
+    deduped_dirs: list[Path] = []
+    seen_dirs: set[Path] = set()
+    for candidate in candidate_dirs:
+        try:
+            normalized = candidate.resolve()
+        except OSError:
+            normalized = candidate
+        if normalized in seen_dirs:
+            continue
+        seen_dirs.add(normalized)
+        deduped_dirs.append(candidate)
+    return tuple(deduped_dirs)
+
+
 def _parse_string_list(raw_value: Any, *, field_name: str, config_kind: str) -> tuple[str, ...]:
     if raw_value is None:
         return ()
@@ -318,3 +637,50 @@ def _parse_string_mapping(raw_value: Any, *, field_name: str, config_kind: str) 
         key = _require_non_empty_string(raw_key, f"{field_name}.<key>", config_kind)
         rendered_mapping[key] = _require_non_empty_string(raw_item, f"{field_name}.{key}", config_kind)
     return rendered_mapping
+
+
+def _read_field(value: Any, field_name: str) -> Any:
+    if isinstance(value, Mapping):
+        return value.get(field_name)
+    return getattr(value, field_name, None)
+
+
+def _read_string_field(value: Any, field_name: str) -> str | None:
+    field_value = _read_field(value, field_name)
+    return field_value if isinstance(field_value, str) and field_value.strip() else None
+
+
+def _summarize_json_like(value: Any, *, max_length: int = 220) -> str | None:
+    if value in (None, "", [], {}):
+        return None
+    try:
+        rendered = json.dumps(value, ensure_ascii=False, sort_keys=True)
+    except TypeError:
+        rendered = str(value)
+    rendered = " ".join(rendered.split())
+    if len(rendered) <= max_length:
+        return rendered
+    return f"{rendered[: max_length - 3]}..."
+
+
+def _summarize_prompt_arguments(arguments: Any, *, max_length: int = 220) -> str | None:
+    if not isinstance(arguments, SequenceCollection) or isinstance(arguments, (str, bytes, bytearray)):
+        return None
+    rendered_arguments: list[str] = []
+    for argument in arguments:
+        name = _read_string_field(argument, "name")
+        if not name:
+            continue
+        rendered_argument = name
+        description = _read_string_field(argument, "description")
+        if description:
+            rendered_argument += f": {description}"
+        if bool(_read_field(argument, "required")):
+            rendered_argument += " (required)"
+        rendered_arguments.append(rendered_argument)
+    if not rendered_arguments:
+        return None
+    rendered = "; ".join(rendered_arguments)
+    if len(rendered) <= max_length:
+        return rendered
+    return f"{rendered[: max_length - 3]}..."

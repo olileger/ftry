@@ -4,6 +4,7 @@ import asyncio
 import builtins
 import os
 import sys
+import types
 import unittest
 from contextlib import AsyncExitStack
 from pathlib import Path
@@ -132,6 +133,78 @@ class McpTests(unittest.TestCase):
         self.assertEqual(len(FakeMCPStdioTool.closed_tools), 1)
         self.assertEqual(len(FakeMCPStreamableHTTPTool.entered_tools), 1)
         self.assertEqual(len(FakeMCPStreamableHTTPTool.closed_tools), 1)
+
+    def test_open_connections_discovers_runtime_capabilities(self) -> None:
+        reset_fakes()
+        FakeMCPStdioTool.discovery_tools = [
+            types.SimpleNamespace(
+                name="write_file",
+                title="Write file",
+                description="Write a file to disk.",
+                inputSchema={"type": "object", "properties": {"path": {"type": "string"}}},
+            )
+        ]
+        FakeMCPStdioTool.discovery_prompts = [
+            types.SimpleNamespace(
+                name="summarize_path",
+                description="Summarize a file.",
+                arguments=[types.SimpleNamespace(name="path", description="Target path", required=True)],
+            )
+        ]
+        FakeMCPStdioTool.discovery_resources = [
+            types.SimpleNamespace(name="workspace-root", uri="file:///workspace", description="Workspace root")
+        ]
+        FakeMCPStdioTool.discovery_resource_templates = [
+            types.SimpleNamespace(name="workspace-file", uriTemplate="file:///workspace/{path}", description="Workspace file")
+        ]
+
+        async def open_connections() -> tuple[object, ...]:
+            async with AsyncExitStack() as exit_stack:
+                return await mcp_module.Mcp.open_connections(
+                    (mcp_module.Mcp(mcp_module.McpConfig(name="file-system", transport="stdio", command="uvx")),),
+                    exit_stack=exit_stack,
+                )
+
+        with patch.dict(sys.modules, make_fake_agent_framework_modules(), clear=False):
+            connections = asyncio.run(open_connections())
+
+        self.assertEqual(len(connections), 1)
+        capabilities = connections[0].capabilities
+        self.assertEqual(capabilities.server_name, "file-system")
+        self.assertEqual(capabilities.tools[0].name, "write_file")
+        self.assertIn('"path"', capabilities.tools[0].input_schema_summary or "")
+        self.assertEqual(capabilities.prompts[0].name, "summarize_path")
+        self.assertIn("path: Target path (required)", capabilities.prompts[0].arguments_summary or "")
+        self.assertEqual(capabilities.resources[0].uri, "file:///workspace")
+        self.assertEqual(capabilities.resource_templates[0].uri_template, "file:///workspace/{path}")
+
+    def test_render_runtime_context_reports_partial_discovery_warnings(self) -> None:
+        connection = mcp_module.McpRuntimeConnection(
+            mcp=mcp_module.Mcp(mcp_module.McpConfig(name="demo", transport="stdio", command="uvx")),
+            tool=object(),
+            capabilities=mcp_module.McpServerCapabilities(
+                server_name="demo",
+                transport="stdio",
+                warnings=("Runtime MCP session does not expose resources.",),
+            ),
+        )
+
+        rendered = mcp_module.Mcp.render_runtime_context((connection,))
+
+        self.assertIsNotNone(rendered)
+        assert rendered is not None
+        self.assertIn("<McpRuntimeCapabilities>", rendered)
+        self.assertIn("Runtime MCP session does not expose resources.", rendered)
+
+    def test_discover_capabilities_reports_missing_live_session(self) -> None:
+        capabilities = asyncio.run(
+            mcp_module.Mcp(
+                mcp_module.McpConfig(name="demo", transport="stdio", command="uvx")
+            ).discover_capabilities(object())
+        )
+
+        self.assertEqual(capabilities.server_name, "demo")
+        self.assertIn("Live MCP session metadata is not exposed by the runtime tool.", capabilities.warnings)
 
     def test_create_mcp_tool_requires_python_mcp_package(self) -> None:
         reset_fakes()

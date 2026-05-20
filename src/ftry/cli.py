@@ -29,7 +29,11 @@ def _run_line_command() -> int:
 
 def _run_build_command(prompt: str, *, output_dir: str | None = None) -> int:
     _print_build_banner()
-    created_files = build_from_prompt(prompt, output_dir=output_dir)
+    created_files = build_from_prompt(
+        prompt,
+        output_dir=output_dir,
+        user_input_provider=_read_agent_follow_up_input,
+    )
     print("\n".join(str(path) for path in created_files))
     return 0
 
@@ -60,7 +64,7 @@ def _read_agent_follow_up_input(
     target_output = sys.stderr if output_stream is None else output_stream
     if not getattr(target_input, "isatty", lambda: False)() or not getattr(target_output, "isatty", lambda: False)():
         raise FtryCliError(
-            "Interactive request/response conversations require an interactive terminal on stdin and stderr for `ftry pop`."
+            "Interactive request/response conversations require an interactive terminal on stdin and stderr for `ftry pop` and `ftry build`."
         )
 
     target_output.write(f"{AGENT_INPUT_PROMPT}")

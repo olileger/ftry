@@ -44,11 +44,13 @@ prompt: |
   - Do not omit MCP references when the inferred design requires external capabilities such as filesystem access.
   - Never redefine an MCP descriptor that already exists in the provided catalog; reuse it by name instead.
   - If a new MCP descriptor is needed, keep it conservative and declarative.
+  - Never invent a stdio `command`, shell wrapper, or fake executable for a new MCP descriptor.
+  - If the available information is insufficient to define a real MCP connection, do not fabricate runnable details.
+  - If a stdio MCP descriptor still lacks the exact launch command after earlier steps, do not emit placeholder text; the pipeline must obtain a user clarification first.
   - Never include secrets in clear text. Use `env:VAR_NAME` string values where credentials are required.
   - Supported `transport` values are `stdio`, `http`, and `websocket`.
   - For `stdio`, include `command`, optional `args`, optional `env`, and optional `allowed_tools`.
   - For `http` and `websocket`, include `url`, optional `headers`, and optional `allowed_tools`.
-  - If details are uncertain, emit a valid stub rather than inventing precise credentials or unsafe commands.
 
   Design rules:
   - Prefer the simplest valid design.

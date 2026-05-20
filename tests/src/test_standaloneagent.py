@@ -5,6 +5,7 @@ import io
 import os
 import sys
 import tempfile
+import types
 import unittest
 from contextlib import redirect_stderr
 from pathlib import Path
@@ -181,6 +182,20 @@ class StandaloneAgentTests(unittest.TestCase):
                     "prompt": "Inspect files.",
                 }
             )
+            FakeMCPStdioTool.discovery_tools = [
+                types.SimpleNamespace(
+                    name="write_file",
+                    description="Write a file to disk.",
+                    inputSchema={"type": "object", "properties": {"path": {"type": "string"}}},
+                )
+            ]
+            FakeMCPStdioTool.discovery_prompts = [
+                types.SimpleNamespace(
+                    name="summarize_path",
+                    description="Summarize a path.",
+                    arguments=[types.SimpleNamespace(name="path", description="Target path", required=True)],
+                )
+            ]
 
             with (
                 patch.dict(sys.modules, make_fake_agent_framework_modules(), clear=False),
@@ -192,8 +207,52 @@ class StandaloneAgentTests(unittest.TestCase):
         self.assertIsNotNone(FakeOpenAIChatCompletionClient.last_agent)
         self.assertEqual(len(FakeOpenAIChatCompletionClient.last_agent.tools), 1)
         self.assertEqual(FakeOpenAIChatCompletionClient.last_agent.tools[0].name, "file-system")
+        self.assertIn("<McpRuntimeCapabilities>", FakeOpenAIChatCompletionClient.last_agent.instructions)
+        self.assertIn("write_file", FakeOpenAIChatCompletionClient.last_agent.instructions)
+        self.assertIn("summarize_path", FakeOpenAIChatCompletionClient.last_agent.instructions)
         self.assertEqual(len(FakeMCPStdioTool.entered_tools), 1)
         self.assertEqual(len(FakeMCPStdioTool.closed_tools), 1)
+
+    def test_run_resolves_mcp_registry_from_output_root_directory(self) -> None:
+        reset_fakes()
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            output_root = temp_path / "output"
+            output_dir = output_root / "writer"
+            output_dir.mkdir(parents=True)
+            registry_dir = output_root / "mcp"
+            registry_dir.mkdir()
+            (registry_dir / "file-system.yaml").write_text(
+                '\n'.join(['name: "file-system"', 'transport: "stdio"', 'command: "uvx"']),
+                encoding="utf-8",
+            )
+            agent_file = output_dir / "agent.yaml"
+            agent_file.write_text(
+                "\n".join(
+                    [
+                        'name: "Workspace Agent"',
+                        "model:",
+                        '  name: "gpt-4o"',
+                        '  provider: "openai"',
+                        '  api-key: "secret"',
+                        "mcp:",
+                        '  - "file-system"',
+                        "prompt: |",
+                        "  Inspect files.",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            agent = standalone_agent_module.StandaloneAgent.from_file(agent_file)
+
+            with (
+                patch.dict(sys.modules, make_fake_agent_framework_modules(), clear=False),
+                patch("ftry.Mcp.Path.cwd", return_value=temp_path),
+            ):
+                output = asyncio.run(agent.run("List the files"))
+
+        self.assertEqual(output, "Poeme genere")
+        self.assertEqual(len(FakeMCPStdioTool.entered_tools), 1)
 
     def test_run_loops_when_agent_awaits_user_input(self) -> None:
         reset_fakes()

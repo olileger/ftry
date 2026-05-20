@@ -5,7 +5,7 @@ import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from .Mcp import (
     MCP_TRANSPORT_HTTP,
@@ -28,6 +28,17 @@ DEFAULT_TEAM_MAX_TURNS = 6
 BUILD_KIND_AGENT = "agent"
 BUILD_KIND_TEAM = "team"
 BUILD_KIND_VALUES = (BUILD_KIND_AGENT, BUILD_KIND_TEAM)
+MAX_BUILDER_CLARIFICATION_ROUNDS = 3
+_PLACEHOLDER_STDIO_COMMAND_FRAGMENTS = (
+    "path/to/",
+    "path\\to\\",
+    "existing/command",
+    "existing-command",
+    "placeholder",
+    "your-command",
+    "command-here",
+    "<command>",
+)
 
 
 @dataclass(frozen=True)
@@ -69,21 +80,67 @@ class BuildSpec:
     mcp_servers: tuple[_BuiltMcpServerSpec, ...] = ()
 
 
-def build_from_prompt(prompt: str, *, output_dir: str | Path | None = None) -> tuple[Path, ...]:
+UserInputProvider = Callable[[str], str]
+
+
+def build_from_prompt(
+    prompt: str,
+    *,
+    output_dir: str | Path | None = None,
+    user_input_provider: UserInputProvider | None = None,
+) -> tuple[Path, ...]:
     existing_mcp_catalog = Mcp.load_catalog()
-    raw_output = _run_builder_team(prompt, existing_mcp_catalog=existing_mcp_catalog)
-    spec = _parse_build_spec_output(raw_output)
+    clarifications: list[tuple[str, str]] = []
+    for _ in range(MAX_BUILDER_CLARIFICATION_ROUNDS):
+        raw_output = _run_builder_team(
+            prompt,
+            existing_mcp_catalog=existing_mcp_catalog,
+            user_input_provider=user_input_provider,
+            clarifications=clarifications,
+        )
+        spec = _parse_build_spec_output(raw_output)
+        stdio_question = _build_stdio_clarification_question(spec)
+        if stdio_question is None:
+            break
+        if user_input_provider is None:
+            raise FtryCliError(stdio_question)
+        clarifications.append((stdio_question, user_input_provider(stdio_question)))
+    else:
+        raise FtryCliError(
+            "Build could not resolve the required MCP stdio launch details after multiple clarification rounds."
+        )
+
     _validate_build_spec_mcp(spec, existing_catalog=existing_mcp_catalog)
     target_dir = _resolve_build_output_dir(spec, output_dir=output_dir)
     return _write_build_outputs(spec, output_dir=target_dir)
 
 
-def _run_builder_team(prompt: str, *, existing_mcp_catalog: Sequence[McpConfig]) -> str:
+def _run_builder_team(
+    prompt: str,
+    *,
+    existing_mcp_catalog: Sequence[McpConfig],
+    user_input_provider: UserInputProvider | None = None,
+    clarifications: Sequence[tuple[str, str]] = (),
+) -> str:
     builder_team = Team.from_file(INTERNAL_BUILDER_TEAM_FILE)
-    return asyncio.run(builder_team.run(_render_builder_input(prompt, existing_mcp_catalog=existing_mcp_catalog)))
+    return asyncio.run(
+        builder_team.run(
+            _render_builder_input(
+                prompt,
+                existing_mcp_catalog=existing_mcp_catalog,
+                clarifications=clarifications,
+            ),
+            user_input_provider=user_input_provider,
+        )
+    )
 
 
-def _render_builder_input(prompt: str, *, existing_mcp_catalog: Sequence[McpConfig]) -> str:
+def _render_builder_input(
+    prompt: str,
+    *,
+    existing_mcp_catalog: Sequence[McpConfig],
+    clarifications: Sequence[tuple[str, str]] = (),
+) -> str:
     catalog_lines = ["Available MCP descriptors in .\\mcp:"]
     if not existing_mcp_catalog:
         catalog_lines.append("- (none)")
@@ -96,13 +153,19 @@ def _render_builder_input(prompt: str, *, existing_mcp_catalog: Sequence[McpConf
                 line += f" | allowed-tools: {', '.join(config.allowed_tools)}"
             catalog_lines.append(line)
 
-    return "\n".join(
-        [
-            f"User request:\n{prompt}",
-            "",
-            *catalog_lines,
-        ]
-    )
+    rendered_sections = [f"User request:\n{prompt}", ""]
+    if clarifications:
+        rendered_sections.extend(["Clarifications collected during build:"])
+        for index, (question, answer) in enumerate(clarifications, start=1):
+            rendered_sections.extend(
+                [
+                    f"{index}. Question: {question}",
+                    f"   Answer: {answer}",
+                ]
+            )
+        rendered_sections.append("")
+    rendered_sections.extend(catalog_lines)
+    return "\n".join(rendered_sections)
 
 
 def _parse_build_spec_output(raw_output: str) -> BuildSpec:
@@ -230,6 +293,7 @@ def _validate_build_spec_mcp(spec: BuildSpec, *, existing_catalog: Sequence[McpC
             )
         if mcp_server.name in new_names:
             raise FtryCliError(f"Build team output defines the MCP descriptor `{mcp_server.name}` more than once.")
+        _validate_new_mcp_server_spec(mcp_server)
         new_names.add(mcp_server.name)
 
     referenced_names = set()
@@ -247,6 +311,46 @@ def _validate_build_spec_mcp(spec: BuildSpec, *, existing_catalog: Sequence[McpC
             "Build team output referenced unknown MCP descriptors. "
             f"Reuse an existing descriptor or define it in `mcp_servers`: {joined_names}"
         )
+
+
+def _validate_new_mcp_server_spec(mcp_server: _BuiltMcpServerSpec) -> None:
+    if mcp_server.transport != MCP_TRANSPORT_STDIO:
+        return
+    _validate_stdio_mcp_command(mcp_server)
+
+
+def _validate_stdio_mcp_command(mcp_server: _BuiltMcpServerSpec) -> None:
+    command = (mcp_server.command or "").strip()
+    if not command:
+        raise FtryCliError(
+            f"Build team output defined MCP descriptor `{mcp_server.name}` with an empty stdio command."
+        )
+    if _is_placeholder_stdio_command(command):
+        raise FtryCliError(
+            "Build team output defined MCP descriptor "
+            f"`{mcp_server.name}` with a placeholder stdio command `{command}`. "
+            "Ask the user for the exact MCP server launch command instead of emitting a placeholder."
+        )
+
+
+def _build_stdio_clarification_question(spec: BuildSpec) -> str | None:
+    for mcp_server in spec.mcp_servers:
+        if mcp_server.transport != MCP_TRANSPORT_STDIO:
+            continue
+        command = (mcp_server.command or "").strip()
+        if _is_placeholder_stdio_command(command):
+            return (
+                f"Which MCP server do you use for `{mcp_server.name}`, and what exact command launches it "
+                "in your environment?"
+            )
+    return None
+
+
+def _is_placeholder_stdio_command(command: str) -> bool:
+    normalized_command = command.strip().lower().replace("\\", "/")
+    if not normalized_command:
+        return True
+    return any(fragment in normalized_command for fragment in _PLACEHOLDER_STDIO_COMMAND_FRAGMENTS)
 
 
 def _require_output_text(value: Any, field_name: str) -> str:
@@ -316,7 +420,7 @@ def _render_build_files(spec: BuildSpec, *, output_dir: Path) -> tuple[tuple[Pat
         if spec.kind == BUILD_KIND_AGENT
         else _render_team_build_files(spec, output_dir=output_dir)
     )
-    mcp_files = _render_mcp_descriptor_files(spec)
+    mcp_files = _render_mcp_descriptor_files(spec, output_dir=output_dir)
     return solution_files + mcp_files
 
 
@@ -360,10 +464,10 @@ def _render_team_build_files(spec: BuildSpec, *, output_dir: Path) -> tuple[tupl
     return tuple(rendered_files)
 
 
-def _render_mcp_descriptor_files(spec: BuildSpec) -> tuple[tuple[Path, str], ...]:
+def _render_mcp_descriptor_files(spec: BuildSpec, *, output_dir: Path) -> tuple[tuple[Path, str], ...]:
     if not spec.mcp_servers:
         return ()
-    registry_dir = Mcp.get_registry_dir()
+    registry_dir = output_dir.parent / "mcp"
     return tuple(
         (
             registry_dir / f"{_sanitize_agent_name(mcp_server.name, fallback_prefix='mcp').strip('-_').lower() or 'mcp'}.yaml",

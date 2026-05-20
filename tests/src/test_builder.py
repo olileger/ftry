@@ -38,6 +38,35 @@ class BuilderTests(unittest.TestCase):
             with self.assertRaisesRegex(builder_module.FtryCliError, "not a directory"):
                 builder_module._resolve_build_output_dir(spec, output_dir=file_path)
 
+    def test_run_builder_team_passes_interactive_user_input_provider(self) -> None:
+        builder_team = unittest.mock.Mock()
+        builder_team.run = unittest.mock.AsyncMock(return_value='{"kind":"agent","agent":{"name":"Writer","description":"Desc","prompt":"Prompt"}}')
+
+        def user_input_provider(_: str) -> str:
+            return "answer"
+
+        with patch("ftry.Builder.Team.from_file", return_value=builder_team):
+            result = builder_module._run_builder_team(
+                "Create a writer.",
+                existing_mcp_catalog=(),
+                user_input_provider=user_input_provider,
+            )
+
+        self.assertIn('"kind":"agent"', result)
+        builder_team.run.assert_awaited_once()
+        self.assertIs(builder_team.run.await_args.kwargs["user_input_provider"], user_input_provider)
+
+    def test_render_builder_input_includes_clarifications(self) -> None:
+        rendered = builder_module._render_builder_input(
+            "Create a writer.",
+            existing_mcp_catalog=(),
+            clarifications=(("Which command launches it?", "cmd /c npx -y @modelcontextprotocol/server-filesystem C:\\work"),),
+        )
+
+        self.assertIn("Clarifications collected during build:", rendered)
+        self.assertIn("Which command launches it?", rendered)
+        self.assertIn("cmd /c npx -y @modelcontextprotocol/server-filesystem C:\\work", rendered)
+
     def test_parse_build_spec_output_accepts_fenced_json(self) -> None:
         spec = builder_module._parse_build_spec_output(
             """```json
@@ -172,6 +201,8 @@ class BuilderTests(unittest.TestCase):
             self.assertEqual(created_files[2].name, "team.yaml")
             self.assertEqual(created_files[3].name, "shared-files.yaml")
             self.assertEqual(created_files[4].name, "scope-search.yaml")
+            self.assertEqual(created_files[3].parent, temp_path / "mcp")
+            self.assertEqual(created_files[4].parent, temp_path / "mcp")
             rendered_team = (team_output_dir / "team.yaml").read_text(encoding="utf-8")
             self.assertIn("max-turns: 5", rendered_team)
             self.assertIn('  - "shared-files"', rendered_team)
@@ -333,6 +364,66 @@ class BuilderTests(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(builder_module.FtryCliError, "attempted to recreate"):
                     builder_module.build_from_prompt("Create an agent.", output_dir=temp_path / "output")
+
+    def test_build_from_prompt_requests_clarification_for_placeholder_stdio_command(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            responses = iter(
+                [
+                    json.dumps(
+                        {
+                            "kind": "agent",
+                            "agent": {
+                                "name": "Writer",
+                                "description": "Writes content.",
+                                "prompt": "Write the content.",
+                                "mcp": ["file-system"],
+                            },
+                            "mcp_servers": [
+                                {
+                                    "name": "file-system",
+                                    "transport": "stdio",
+                                    "command": "path/to/existing/command",
+                                }
+                            ],
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "kind": "agent",
+                            "agent": {
+                                "name": "Writer",
+                                "description": "Writes content.",
+                                "prompt": "Write the content.",
+                                "mcp": ["file-system"],
+                            },
+                            "mcp_servers": [
+                                {
+                                    "name": "file-system",
+                                    "transport": "stdio",
+                                    "command": "uvx",
+                                    "args": ["mcp-server-filesystem"],
+                                }
+                            ],
+                        }
+                    ),
+                ]
+            )
+            asked_questions: list[str] = []
+
+            def provide_user_input(question: str) -> str:
+                asked_questions.append(question)
+                return "uvx mcp-server-filesystem C:\\work"
+
+            with patch("ftry.Builder._run_builder_team", side_effect=lambda *args, **kwargs: next(responses)):
+                created_files = builder_module.build_from_prompt(
+                    "Create an MCP-aware agent.",
+                    output_dir=temp_dir,
+                    user_input_provider=provide_user_input,
+                )
+
+            self.assertEqual(len(asked_questions), 1)
+            self.assertIn("what exact command launches it", asked_questions[0].lower())
+            self.assertEqual(created_files[0].name, "agent.yaml")
 
 
 if __name__ == "__main__":

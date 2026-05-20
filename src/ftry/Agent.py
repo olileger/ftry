@@ -52,9 +52,16 @@ class AgentConfig:
     model: AgentModelConfig
     description: str | None = None
     mcp_servers: tuple[str, ...] = ()
+    mcp_registry_dir: Path | None = None
 
     @classmethod
-    def from_mapping(cls, config: Mapping[str, Any], *, config_kind: str = "agent") -> AgentConfig:
+    def from_mapping(
+        cls,
+        config: Mapping[str, Any],
+        *,
+        config_kind: str = "agent",
+        mcp_registry_dir: Path | None = None,
+    ) -> AgentConfig:
         model = AgentModelConfig.from_mapping(config.get("model"), config_kind=config_kind, required=True)
         assert model is not None
         return cls(
@@ -63,6 +70,7 @@ class AgentConfig:
             instructions=_require_non_empty_string(config.get("prompt"), "prompt", config_kind),
             model=model,
             mcp_servers=Mcp.parse_server_names(config.get("mcp"), field_name="mcp", config_kind=config_kind),
+            mcp_registry_dir=mcp_registry_dir,
         )
 
     @classmethod
@@ -72,7 +80,11 @@ class AgentConfig:
             raise FtryCliError(f"Agent file not found: {agent_path}")
 
         _load_dotenv_for_config(agent_path)
-        return cls.from_mapping(_load_yaml_mapping(agent_path, config_kind="agent"), config_kind="agent")
+        return cls.from_mapping(
+            _load_yaml_mapping(agent_path, config_kind="agent"),
+            config_kind="agent",
+            mcp_registry_dir=agent_path.parent,
+        )
 
 
 _OPENAI_PROVIDER = "openai"
@@ -136,6 +148,13 @@ class Agent(ABC):
             rendered_instructions = f"{rendered_instructions}\n\n<TeamContext>\n{extra_instructions}\n</TeamContext>"
         return rendered_instructions
 
+    @staticmethod
+    def _merge_extra_instructions(*sections: str | None) -> str | None:
+        rendered_sections = [section.strip() for section in sections if isinstance(section, str) and section.strip()]
+        if not rendered_sections:
+            return None
+        return "\n\n".join(rendered_sections)
+
     def _require_supported_provider(self) -> None:
         provider = self.model.provider.lower()
         if provider != _OPENAI_PROVIDER:
@@ -174,3 +193,12 @@ class Agent(ABC):
         if not self.config.mcp_servers:
             return ()
         return await Mcp.open_tools(Mcp.resolve(self.config.mcp_servers), exit_stack=exit_stack)
+
+    async def _prepare_mcp_runtime(self, exit_stack: AsyncExitStack) -> tuple[tuple[Any, ...], str | None]:
+        if not self.config.mcp_servers:
+            return (), None
+        connections = await Mcp.open_connections(
+            Mcp.resolve(self.config.mcp_servers, cwd=self.config.mcp_registry_dir),
+            exit_stack=exit_stack,
+        )
+        return Mcp.extract_tools(connections), Mcp.render_runtime_context(connections)

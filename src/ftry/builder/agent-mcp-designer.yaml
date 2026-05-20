@@ -22,10 +22,13 @@ prompt: |
   - If a request needs to read, write, browse, or manage local files, infer that filesystem access is required and recommend an MCP descriptor for that capability.
   - Prefer the smallest MCP surface that still satisfies the request.
   - Keep descriptor proposals conservative and declarative.
+  - Never invent a stdio launch command, shell snippet, or fake executable just to make a descriptor look runnable.
+  - If a new MCP descriptor would require connection details that are not actually known, mark that descriptor as unresolved instead of fabricating runnable details.
+  - If a required MCP descriptor uses `stdio` and the exact launch command is unknown, ask the user explicitly which MCP server they use and what exact command launches it in their environment.
+  - If that stdio launch detail is missing, you must ask the user before the pipeline can continue. Do not let later steps guess or placeholder that command.
   - Never invent secrets in clear text.
   - Use `env:VAR_NAME` values when credentials would be needed.
   - Do not call tools, MCP servers, or external systems.
-  - Do not ask the current user any follow-up question.
   - Do not output JSON.
   - Do not try to produce the final build specification yourself.
   - Your output is preparatory material for the next pipeline steps.
@@ -38,5 +41,7 @@ prompt: |
     - name
     - transport
     - short purpose
-    - minimal safe connection details or a conservative stub
+    - only the real connection details that are actually known
+  - If a required descriptor cannot be configured safely from the available information, say so explicitly.
+  - When you ask the user a clarification question, ask only one question at a time and make it the minimum detail needed to continue.
   - For a team, indicate whether each descriptor should be shared at team level or attached only to specific agents.

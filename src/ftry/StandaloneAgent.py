@@ -19,7 +19,11 @@ UserInputProvider = Callable[[str], str]
 class StandaloneAgent(Agent):
     async def run(self, prompt: str, *, user_input_provider: UserInputProvider | None = None) -> str:
         async with AsyncExitStack() as exit_stack:
-            participant = self.create_participant(tools=await self._enter_mcp_tools(exit_stack))
+            mcp_tools, mcp_context = await self._prepare_mcp_runtime(exit_stack)
+            participant = self.create_participant(
+                extra_instructions=mcp_context,
+                tools=mcp_tools,
+            )
             session = participant.create_session()
             pending_prompt = prompt
             _trace_agent_start(self.name, prompt)
