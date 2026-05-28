@@ -81,6 +81,19 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(spec.agent.mcp_servers, ("file-system",))
         self.assertEqual(builder_module._require_optional_output_text(None, "agent.description"), None)
 
+    def test_parse_build_spec_output_repairs_missing_comma_before_top_level_property(self) -> None:
+        spec = builder_module._parse_build_spec_output(
+            '[Config Synthesizer]\n'
+            '{"kind":"agent","agent":{"name":"WebFetcher","description":"An agent that fetches data from a specified URL.",'
+            '"prompt":"Fetch data from the URL: www.google.com and return the HTML content.","mcp":[]}"mcp_servers":[]}'
+        )
+
+        self.assertEqual(spec.kind, builder_module.BUILD_KIND_AGENT)
+        assert spec.agent is not None
+        self.assertEqual(spec.agent.name, "WebFetcher")
+        self.assertEqual(spec.agent.mcp_servers, ())
+        self.assertEqual(spec.mcp_servers, ())
+
     def test_parse_build_spec_output_rejects_invalid_shapes(self) -> None:
         with self.assertRaisesRegex(builder_module.FtryCliError, "valid `kind`"):
             builder_module._parse_build_spec_output('{"kind":"workflow"}')
@@ -141,12 +154,12 @@ class BuilderTests(unittest.TestCase):
                     created_files = builder_module.build_from_prompt("Create a release note agent.", output_dir=temp_path)
 
             agent_output_dir = temp_path / "release-writer"
-            self.assertEqual(created_files, (agent_output_dir / "agent.yaml", temp_path / "mcp" / "file-system.yaml"))
+            self.assertEqual(created_files, (agent_output_dir / "agent.yaml", agent_output_dir / "mcp-file-system.yaml"))
             rendered_agent = (agent_output_dir / "agent.yaml").read_text(encoding="utf-8")
             self.assertIn('name: "Release Writer"', rendered_agent)
             self.assertIn('  - "file-system"', rendered_agent)
             self.assertIn("prompt: |", rendered_agent)
-            self.assertTrue((temp_path / "mcp" / "file-system.yaml").is_file())
+            self.assertTrue((agent_output_dir / "mcp-file-system.yaml").is_file())
             self.assertEqual(StandaloneAgent.from_file(agent_output_dir / "agent.yaml").name, "Release Writer")
 
     def test_build_from_prompt_writes_team_yaml_and_agent_files(self) -> None:
@@ -199,10 +212,10 @@ class BuilderTests(unittest.TestCase):
             self.assertEqual(created_files[0].name, "agent-scope-lead.yaml")
             self.assertEqual(created_files[1].name, "agent-risk-lead.yaml")
             self.assertEqual(created_files[2].name, "team.yaml")
-            self.assertEqual(created_files[3].name, "shared-files.yaml")
-            self.assertEqual(created_files[4].name, "scope-search.yaml")
-            self.assertEqual(created_files[3].parent, temp_path / "mcp")
-            self.assertEqual(created_files[4].parent, temp_path / "mcp")
+            self.assertEqual(created_files[3].name, "mcp-shared-files.yaml")
+            self.assertEqual(created_files[4].name, "mcp-scope-search.yaml")
+            self.assertEqual(created_files[3].parent, team_output_dir)
+            self.assertEqual(created_files[4].parent, team_output_dir)
             rendered_team = (team_output_dir / "team.yaml").read_text(encoding="utf-8")
             self.assertIn("max-turns: 5", rendered_team)
             self.assertIn('  - "shared-files"', rendered_team)
@@ -424,6 +437,89 @@ class BuilderTests(unittest.TestCase):
             self.assertEqual(len(asked_questions), 1)
             self.assertIn("what exact command launches it", asked_questions[0].lower())
             self.assertEqual(created_files[0].name, "agent.yaml")
+
+    def test_build_from_prompt_requests_clarification_for_missing_http_url(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            responses = iter(
+                [
+                    json.dumps(
+                        {
+                            "kind": "agent",
+                            "agent": {
+                                "name": "Research Writer",
+                                "description": "Writes content from web research.",
+                                "prompt": "Research the topic and write the content.",
+                                "mcp": ["web-research"],
+                            },
+                            "mcp_servers": [
+                                {
+                                    "name": "web-research",
+                                    "transport": "http",
+                                }
+                            ],
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "kind": "agent",
+                            "agent": {
+                                "name": "Research Writer",
+                                "description": "Writes content from web research.",
+                                "prompt": "Research the topic and write the content.",
+                                "mcp": ["web-research"],
+                            },
+                            "mcp_servers": [
+                                {
+                                    "name": "web-research",
+                                    "transport": "http",
+                                    "url": "https://research.example.net/mcp",
+                                }
+                            ],
+                        }
+                    ),
+                ]
+            )
+            asked_questions: list[str] = []
+
+            def provide_user_input(question: str) -> str:
+                asked_questions.append(question)
+                return "https://research.example.net/mcp"
+
+            with patch("ftry.Builder._run_builder_team", side_effect=lambda *args, **kwargs: next(responses)):
+                created_files = builder_module.build_from_prompt(
+                    "Create an MCP-aware research agent.",
+                    output_dir=temp_dir,
+                    user_input_provider=provide_user_input,
+                )
+
+            self.assertEqual(len(asked_questions), 1)
+            self.assertIn("exact http url", asked_questions[0].lower())
+            self.assertEqual(created_files[0].name, "agent.yaml")
+
+    def test_build_from_prompt_requires_interactive_http_url_clarification(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            with patch(
+                "ftry.Builder._run_builder_team",
+                return_value=json.dumps(
+                    {
+                        "kind": "agent",
+                        "agent": {
+                            "name": "Research Writer",
+                            "description": "Writes content from web research.",
+                            "prompt": "Research the topic and write the content.",
+                            "mcp": ["web-research"],
+                        },
+                        "mcp_servers": [
+                            {
+                                "name": "web-research",
+                                "transport": "http",
+                            }
+                        ],
+                    }
+                ),
+            ):
+                with self.assertRaisesRegex(builder_module.FtryCliError, "exact HTTP URL"):
+                    builder_module.build_from_prompt("Create an MCP-aware research agent.", output_dir=temp_dir)
 
 
 if __name__ == "__main__":

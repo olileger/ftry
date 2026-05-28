@@ -74,6 +74,39 @@ class McpTests(unittest.TestCase):
                 with self.assertRaisesRegex(mcp_module.FtryCliError, "not found"):
                     mcp_module.Mcp.resolve_configs(["missing-server"])
 
+    def test_load_mcp_server_catalog_reads_local_prefixed_descriptors_without_parsing_agent_yaml(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            (temp_path / "agent.yaml").write_text(
+                "\n".join(
+                    [
+                        'name: "Workspace Agent"',
+                        "model:",
+                        '  name: "gpt-4o"',
+                        '  provider: "openai"',
+                        '  api-key: "secret"',
+                        "prompt: |",
+                        "  Inspect files.",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            (temp_path / "mcp-file-system.yaml").write_text(
+                "\n".join(
+                    [
+                        'name: "file-system"',
+                        'transport: "stdio"',
+                        'command: "uvx"',
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            with patch("ftry.Mcp.Path.cwd", return_value=temp_path):
+                catalog = mcp_module.Mcp.load_catalog()
+
+        self.assertEqual([config.name for config in catalog], ["file-system"])
+
     def test_create_mcp_tool_builds_framework_specific_tools(self) -> None:
         reset_fakes()
         with (

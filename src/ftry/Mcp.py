@@ -18,6 +18,7 @@ from .Tools import (
 )
 
 MCP_DIR_NAME = "mcp"
+LOCAL_MCP_DESCRIPTOR_FILE_PREFIX = "mcp-"
 MCP_TRANSPORT_STDIO = "stdio"
 MCP_TRANSPORT_HTTP = "http"
 MCP_TRANSPORT_WEBSOCKET = "websocket"
@@ -132,13 +133,7 @@ class Mcp:
 
     @classmethod
     def load_catalog(cls, *, cwd: Path | None = None) -> tuple[McpConfig, ...]:
-        registry_dir = cls.get_registry_dir(cwd=cwd)
-        if not registry_dir.exists():
-            return ()
-        if not registry_dir.is_dir():
-            raise FtryCliError(f"MCP registry path is not a directory: {registry_dir}")
-
-        descriptor_paths = sorted(registry_dir.glob("*.yaml"))
+        descriptor_paths = cls._list_descriptor_paths(cwd=cwd)
         configs: list[McpConfig] = []
         seen_by_name: dict[str, Path] = {}
         for descriptor_path in descriptor_paths:
@@ -164,7 +159,7 @@ class Mcp:
         if not resolved_names:
             return ()
 
-        searched_registry_dirs = [cls.get_registry_dir(cwd=base_dir) for base_dir in _iter_registry_base_dirs(cwd)]
+        searched_locations = cls._describe_search_locations(cwd=cwd)
         catalog: dict[str, McpConfig] = {}
         for base_dir in _iter_registry_base_dirs(cwd):
             for config in cls.load_catalog(cwd=base_dir):
@@ -172,7 +167,7 @@ class Mcp:
         missing_names = [name for name in resolved_names if name not in catalog]
         if missing_names:
             missing_fragment = ", ".join(f"`{name}`" for name in missing_names)
-            registry_fragment = ", ".join(f"`{path}`" for path in searched_registry_dirs)
+            registry_fragment = ", ".join(f"`{path}`" for path in searched_locations)
             raise FtryCliError(
                 f"Referenced MCP descriptor(s) not found in {registry_fragment}: {missing_fragment}"
             )
@@ -243,6 +238,34 @@ class Mcp:
                 line += f" | allowed-tools: {', '.join(config.allowed_tools)}"
             lines.append(line)
         return "\n".join(lines)
+
+    @classmethod
+    def _list_descriptor_paths(cls, *, cwd: Path | None = None) -> tuple[Path, ...]:
+        base_dir = Path.cwd() if cwd is None else Path(cwd)
+        registry_dir = cls.get_registry_dir(cwd=base_dir)
+        local_descriptor_paths = sorted(base_dir.glob(f"{LOCAL_MCP_DESCRIPTOR_FILE_PREFIX}*.yaml"))
+        registry_descriptor_paths: list[Path] = []
+        if registry_dir.exists():
+            if not registry_dir.is_dir():
+                raise FtryCliError(f"MCP registry path is not a directory: {registry_dir}")
+            registry_descriptor_paths = sorted(registry_dir.glob("*.yaml"))
+        return tuple(local_descriptor_paths + registry_descriptor_paths)
+
+    @classmethod
+    def _describe_search_locations(cls, *, cwd: Path | None = None) -> tuple[str, ...]:
+        locations: list[str] = []
+        for base_dir in _iter_registry_base_dirs(cwd):
+            base_path = Path(base_dir)
+            locations.append(str(base_path / f"{LOCAL_MCP_DESCRIPTOR_FILE_PREFIX}*.yaml"))
+            locations.append(str(cls.get_registry_dir(cwd=base_path)))
+        deduped_locations: list[str] = []
+        seen_locations: set[str] = set()
+        for location in locations:
+            if location in seen_locations:
+                continue
+            seen_locations.add(location)
+            deduped_locations.append(location)
+        return tuple(deduped_locations)
 
     @classmethod
     async def open_connections(

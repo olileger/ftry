@@ -307,15 +307,14 @@ class TeamTests(unittest.TestCase):
         self.assertEqual(len(FakeMCPStdioTool.entered_tools), 2)
         self.assertEqual(len(FakeMCPStdioTool.closed_tools), 2)
 
-    def test_team_from_file_resolves_mcp_registry_from_output_root_directory(self) -> None:
+    def test_team_from_file_resolves_mcp_registry_from_team_output_directory(self) -> None:
         reset_fakes()
         with TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
             output_root = temp_path / "output"
             team_dir = output_root / "launch-team"
             team_dir.mkdir(parents=True)
-            (output_root / "mcp").mkdir()
-            (output_root / "mcp" / "shared-files.yaml").write_text(
+            (team_dir / "mcp-shared-files.yaml").write_text(
                 '\n'.join(['name: "shared-files"', 'transport: "stdio"', 'command: "uvx"']),
                 encoding="utf-8",
             )

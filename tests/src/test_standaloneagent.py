@@ -213,16 +213,14 @@ class StandaloneAgentTests(unittest.TestCase):
         self.assertEqual(len(FakeMCPStdioTool.entered_tools), 1)
         self.assertEqual(len(FakeMCPStdioTool.closed_tools), 1)
 
-    def test_run_resolves_mcp_registry_from_output_root_directory(self) -> None:
+    def test_run_resolves_mcp_registry_from_agent_output_directory(self) -> None:
         reset_fakes()
         with TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
             output_root = temp_path / "output"
             output_dir = output_root / "writer"
             output_dir.mkdir(parents=True)
-            registry_dir = output_root / "mcp"
-            registry_dir.mkdir()
-            (registry_dir / "file-system.yaml").write_text(
+            (output_dir / "mcp-file-system.yaml").write_text(
                 '\n'.join(['name: "file-system"', 'transport: "stdio"', 'command: "uvx"']),
                 encoding="utf-8",
             )

@@ -25,7 +25,8 @@ prompt: |
   - Never invent a stdio launch command, shell snippet, or fake executable just to make a descriptor look runnable.
   - If a new MCP descriptor would require connection details that are not actually known, mark that descriptor as unresolved instead of fabricating runnable details.
   - If a required MCP descriptor uses `stdio` and the exact launch command is unknown, ask the user explicitly which MCP server they use and what exact command launches it in their environment.
-  - If that stdio launch detail is missing, you must ask the user before the pipeline can continue. Do not let later steps guess or placeholder that command.
+  - If a required MCP descriptor uses `http` or `websocket` and the exact server URL is unknown, ask the user explicitly for that URL before the pipeline can continue.
+  - If those transport-specific connection details are missing, you must ask the user before the pipeline can continue. Do not let later steps guess or placeholder them.
   - Never invent secrets in clear text.
   - Use `env:VAR_NAME` values when credentials would be needed.
   - Do not call tools, MCP servers, or external systems.

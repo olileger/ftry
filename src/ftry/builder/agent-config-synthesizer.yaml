@@ -47,6 +47,7 @@ prompt: |
   - Never invent a stdio `command`, shell wrapper, or fake executable for a new MCP descriptor.
   - If the available information is insufficient to define a real MCP connection, do not fabricate runnable details.
   - If a stdio MCP descriptor still lacks the exact launch command after earlier steps, do not emit placeholder text; the pipeline must obtain a user clarification first.
+  - If an `http` or `websocket` MCP descriptor still lacks the exact URL after earlier steps, do not emit an empty or placeholder URL; the pipeline must obtain a user clarification first.
   - Never include secrets in clear text. Use `env:VAR_NAME` string values where credentials are required.
   - Supported `transport` values are `stdio`, `http`, and `websocket`.
   - For `stdio`, include `command`, optional `args`, optional `env`, and optional `allowed_tools`.

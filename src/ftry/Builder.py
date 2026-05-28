@@ -25,6 +25,7 @@ DEFAULT_MODEL_NAME = "gpt-4o-2024-08-06"
 DEFAULT_MODEL_PROVIDER = "openai"
 DEFAULT_MODEL_API_KEY = "env:OAI_API_KEY"
 DEFAULT_TEAM_MAX_TURNS = 6
+LOCAL_MCP_DESCRIPTOR_FILE_PREFIX = "mcp-"
 BUILD_KIND_AGENT = "agent"
 BUILD_KIND_TEAM = "team"
 BUILD_KIND_VALUES = (BUILD_KIND_AGENT, BUILD_KIND_TEAM)
@@ -38,6 +39,13 @@ _PLACEHOLDER_STDIO_COMMAND_FRAGMENTS = (
     "your-command",
     "command-here",
     "<command>",
+)
+_PLACEHOLDER_NETWORK_URL_FRAGMENTS = (
+    ".invalid",
+    "placeholder",
+    "<url>",
+    "your-url",
+    "your-server",
 )
 
 
@@ -99,15 +107,15 @@ def build_from_prompt(
             clarifications=clarifications,
         )
         spec = _parse_build_spec_output(raw_output)
-        stdio_question = _build_stdio_clarification_question(spec)
-        if stdio_question is None:
+        mcp_question = _build_mcp_clarification_question(spec)
+        if mcp_question is None:
             break
         if user_input_provider is None:
-            raise FtryCliError(stdio_question)
-        clarifications.append((stdio_question, user_input_provider(stdio_question)))
+            raise FtryCliError(mcp_question)
+        clarifications.append((mcp_question, user_input_provider(mcp_question)))
     else:
         raise FtryCliError(
-            "Build could not resolve the required MCP stdio launch details after multiple clarification rounds."
+            "Build could not resolve the required MCP connection details after multiple clarification rounds."
         )
 
     _validate_build_spec_mcp(spec, existing_catalog=existing_mcp_catalog)
@@ -214,14 +222,28 @@ def _parse_json_mapping(raw_output: str, *, error_subject: str) -> Mapping[str, 
         if not candidate or candidate in seen_candidates:
             continue
         seen_candidates.add(candidate)
-        try:
-            parsed = json.loads(candidate)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(parsed, Mapping):
-            return parsed
+        for candidate_variant in (candidate, _repair_builder_json_candidate(candidate)):
+            if not candidate_variant:
+                continue
+            try:
+                parsed = json.loads(candidate_variant)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, Mapping):
+                return parsed
 
     raise FtryCliError(f"{error_subject} output is missing the structured JSON payload required by `ftry build`.")
+
+
+def _repair_builder_json_candidate(candidate: str) -> str:
+    repaired_candidate = candidate
+    repair_patterns = (
+        # Common builder-model mistake: missing comma between a closed object/array and the next property.
+        (r'([}\]])(\s*)"([A-Za-z0-9_-]+)"\s*:', r'\1,\2"\3":'),
+    )
+    for pattern, replacement in repair_patterns:
+        repaired_candidate = re.sub(pattern, replacement, repaired_candidate)
+    return repaired_candidate
 
 
 def _parse_built_agent_spec(raw_value: Any, *, field_name: str) -> _BuiltAgentSpec:
@@ -268,18 +290,28 @@ def _parse_built_mcp_server_spec(raw_value: Any, *, field_name: str) -> _BuiltMc
         "description": _require_optional_output_text(raw_value.get("description"), f"{field_name}.description"),
         "allowed_tools": _require_output_name_list(raw_value.get("allowed_tools"), field_name=f"{field_name}.allowed_tools"),
     }
-    if transport == MCP_TRANSPORT_STDIO:
-        return _BuiltMcpServerSpec(
-            command=_require_output_text(raw_value.get("command"), f"{field_name}.command"),
-            args=_require_output_text_list(raw_value.get("args"), field_name=f"{field_name}.args"),
-            env=_require_optional_output_mapping(raw_value.get("env"), field_name=f"{field_name}.env"),
-            **common_kwargs,
-        )
     return _BuiltMcpServerSpec(
-        url=_require_output_text(raw_value.get("url"), f"{field_name}.url"),
-        headers=_require_optional_output_mapping(raw_value.get("headers"), field_name=f"{field_name}.headers"),
         **common_kwargs,
+        **_build_transport_specific_mcp_fields(raw_value, field_name=field_name, transport=transport),
     )
+
+
+def _build_transport_specific_mcp_fields(
+    raw_value: Mapping[str, Any],
+    *,
+    field_name: str,
+    transport: str,
+) -> dict[str, Any]:
+    if transport == MCP_TRANSPORT_STDIO:
+        return {
+            "command": _require_optional_output_text_or_none(raw_value.get("command"), f"{field_name}.command"),
+            "args": _require_output_text_list(raw_value.get("args"), field_name=f"{field_name}.args"),
+            "env": _require_optional_output_mapping(raw_value.get("env"), field_name=f"{field_name}.env"),
+        }
+    return {
+        "url": _require_optional_output_text_or_none(raw_value.get("url"), f"{field_name}.url"),
+        "headers": _require_optional_output_mapping(raw_value.get("headers"), field_name=f"{field_name}.headers"),
+    }
 
 
 def _validate_build_spec_mcp(spec: BuildSpec, *, existing_catalog: Sequence[McpConfig]) -> None:
@@ -314,9 +346,10 @@ def _validate_build_spec_mcp(spec: BuildSpec, *, existing_catalog: Sequence[McpC
 
 
 def _validate_new_mcp_server_spec(mcp_server: _BuiltMcpServerSpec) -> None:
-    if mcp_server.transport != MCP_TRANSPORT_STDIO:
+    if mcp_server.transport == MCP_TRANSPORT_STDIO:
+        _validate_stdio_mcp_command(mcp_server)
         return
-    _validate_stdio_mcp_command(mcp_server)
+    _validate_network_mcp_url(mcp_server)
 
 
 def _validate_stdio_mcp_command(mcp_server: _BuiltMcpServerSpec) -> None:
@@ -333,16 +366,42 @@ def _validate_stdio_mcp_command(mcp_server: _BuiltMcpServerSpec) -> None:
         )
 
 
-def _build_stdio_clarification_question(spec: BuildSpec) -> str | None:
+def _validate_network_mcp_url(mcp_server: _BuiltMcpServerSpec) -> None:
+    url = (mcp_server.url or "").strip()
+    if not url:
+        raise FtryCliError(
+            f"Build team output defined MCP descriptor `{mcp_server.name}` with an empty {mcp_server.transport} URL."
+        )
+    if _is_placeholder_network_url(url):
+        raise FtryCliError(
+            "Build team output defined MCP descriptor "
+            f"`{mcp_server.name}` with a placeholder {mcp_server.transport} URL `{url}`. "
+            "Ask the user for the exact MCP server URL instead of emitting a placeholder."
+        )
+
+
+def _build_mcp_clarification_question(spec: BuildSpec) -> str | None:
     for mcp_server in spec.mcp_servers:
-        if mcp_server.transport != MCP_TRANSPORT_STDIO:
-            continue
+        question = _build_mcp_server_clarification_question(mcp_server)
+        if question is not None:
+            return question
+    return None
+
+
+def _build_mcp_server_clarification_question(mcp_server: _BuiltMcpServerSpec) -> str | None:
+    if mcp_server.transport == MCP_TRANSPORT_STDIO:
         command = (mcp_server.command or "").strip()
-        if _is_placeholder_stdio_command(command):
+        if not command or _is_placeholder_stdio_command(command):
             return (
                 f"Which MCP server do you use for `{mcp_server.name}`, and what exact command launches it "
                 "in your environment?"
             )
+        return None
+
+    url = (mcp_server.url or "").strip()
+    if not url or _is_placeholder_network_url(url):
+        transport_label = "WebSocket" if mcp_server.transport == MCP_TRANSPORT_WEBSOCKET else "HTTP"
+        return f"What is the exact {transport_label} URL for MCP server `{mcp_server.name}` in your environment?"
     return None
 
 
@@ -353,10 +412,25 @@ def _is_placeholder_stdio_command(command: str) -> bool:
     return any(fragment in normalized_command for fragment in _PLACEHOLDER_STDIO_COMMAND_FRAGMENTS)
 
 
+def _is_placeholder_network_url(url: str) -> bool:
+    normalized_url = url.strip().lower()
+    if not normalized_url:
+        return True
+    return any(fragment in normalized_url for fragment in _PLACEHOLDER_NETWORK_URL_FRAGMENTS)
+
+
 def _require_output_text(value: Any, field_name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise FtryCliError(f"Build team output is missing a non-empty `{field_name}`.")
     return value.strip()
+
+
+def _require_optional_output_text_or_none(value: Any, field_name: str) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, str) and not value.strip():
+        return None
+    return _require_output_text(value, field_name)
 
 
 def _require_optional_output_text(value: Any, field_name: str) -> str | None:
@@ -467,14 +541,18 @@ def _render_team_build_files(spec: BuildSpec, *, output_dir: Path) -> tuple[tupl
 def _render_mcp_descriptor_files(spec: BuildSpec, *, output_dir: Path) -> tuple[tuple[Path, str], ...]:
     if not spec.mcp_servers:
         return ()
-    registry_dir = output_dir.parent / "mcp"
     return tuple(
         (
-            registry_dir / f"{_sanitize_agent_name(mcp_server.name, fallback_prefix='mcp').strip('-_').lower() or 'mcp'}.yaml",
+            output_dir / _build_mcp_descriptor_file_name(mcp_server.name),
             _render_mcp_descriptor_yaml(mcp_server),
         )
         for mcp_server in spec.mcp_servers
     )
+
+
+def _build_mcp_descriptor_file_name(server_name: str) -> str:
+    stem = _sanitize_agent_name(server_name, fallback_prefix="mcp").strip("-_").lower() or "mcp"
+    return f"{LOCAL_MCP_DESCRIPTOR_FILE_PREFIX}{stem}.yaml"
 
 
 def _ensure_output_files_do_not_exist(rendered_files: Sequence[tuple[Path, str]]) -> None:
