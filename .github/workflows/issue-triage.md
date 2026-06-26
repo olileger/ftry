@@ -34,7 +34,9 @@ Read the issue title and body to determine its nature:
 
 - Apply label `BugFix` if the issue describes a malfunction, error, crash, regression, or unexpected behavior.
 - Apply label `Feature` if the issue requests new functionality, an enhancement, or a change to existing behavior.
-- If the issue is clearly neither (e.g. a question, spam, or invalid), post a clarifying comment and call `noop`.
+- If the issue is clearly neither (e.g. a question, spam, or invalid), post a comment such as:
+  > "Hi @<author>! This issue doesn't appear to describe a bug or feature request. For questions, please use Discussions. If this is a valid issue, please reopen with more context."
+  Then call `noop`.
 
 ### 2. Assign Priority
 
@@ -50,8 +52,10 @@ Based on the impact and urgency described in the issue, assign exactly one prior
 Search existing open issues for similar problems:
 
 ```
-gh issue list --state open --limit 100 --json number,title,body
+gh issue list --state open --limit 500 --json number,title,body
 ```
+
+Fetch up to 500 open issues to maximize duplicate coverage. For very active repositories, prefer the most recent issues by creation date.
 
 Compare the new issue's title and description against open issues. If a clear duplicate exists:
 
@@ -66,7 +70,13 @@ If the issue description is too vague to triage confidently:
 - For a `BugFix`: missing steps to reproduce, expected vs. actual behavior, or environment details.
 - For a `Feature`: missing acceptance criteria, motivation, or use case.
 
-Apply label `needs-clarification` and post a comment listing the specific information needed.
+Apply label `needs-clarification` and post a comment listing the specific information needed. Use the following template as a guide:
+
+> "Hi @<author>! Thanks for opening this issue. To help us triage it effectively, could you please provide:
+> - **[For BugFix]** Steps to reproduce, expected behavior, actual behavior, and environment details (OS, version, etc.).
+> - **[For Feature]** A concrete use case or motivation, and acceptance criteria for what "done" looks like.
+>
+> We'll revisit once we have this information."
 
 ### 5. Assign to Team Members
 
@@ -76,7 +86,12 @@ Retrieve the list of available repository collaborators:
 gh api /repos/{owner}/{repo}/collaborators
 ```
 
-Based on the issue type and scope, assign the most appropriate collaborator. Prefer maintainers for critical or architectural issues; prefer contributors with matching recent activity for specific subsystems.
+Based on the issue type and scope, assign the most appropriate collaborator using these criteria (in order of preference):
+
+1. **Explicit subsystem ownership**: look for file paths or module names mentioned in the issue; use `gh api /repos/{owner}/{repo}/commits?path=<path>&per_page=5` to find recent committers on relevant files.
+2. **Label-based routing**: assign maintainers (role `maintain` or `admin`) to `priority:critical` or `priority:high` issues; assign any active contributor otherwise.
+3. **Workload balance**: prefer collaborators not already assigned to many open issues (`gh issue list --assignee <login> --state open --json number | length`).
+4. **Fallback**: if no clear match is found, do not assign and leave the issue for manual triage.
 
 Use `update-issue` to set the `assignees` field.
 
